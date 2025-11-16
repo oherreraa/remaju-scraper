@@ -2,371 +2,457 @@ import json
 import os
 import time
 import logging
-import random
+import re
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def setup_driver():
-    """Configurar Chrome driver para evadir detección de bots"""
+    """Configurar Chrome driver optimizado"""
     chrome_options = Options()
     
-    # Opciones básicas para GitHub Actions
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1366,768')
     
-    # Opciones anti-detección
-    chrome_options.add_argument('--window-size=1920,1080')
-    chrome_options.add_argument('--start-maximized')
+    # Optimizaciones de velocidad
+    chrome_options.add_argument('--disable-images')
+    chrome_options.add_argument('--disable-plugins')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-web-security')
+    
+    # Anti-detección básico
     chrome_options.add_argument('--disable-blink-features=AutomationControlled')
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
+    chrome_options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
     
-    # Headers más realistas
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ]
-    
-    chrome_options.add_argument(f'--user-agent={random.choice(user_agents)}')
-    
-    # Configurar driver
-    if os.getenv('GITHUB_ACTIONS'):
-        logger.info("Ejecutando en GitHub Actions")
-        driver = webdriver.Chrome(options=chrome_options)
-    else:
-        logger.info("Ejecutando localmente")
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
-        except:
-            driver = webdriver.Chrome(options=chrome_options)
-    
-    # Script para evadir detección
+    driver = webdriver.Chrome(options=chrome_options)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
     return driver
 
-def human_like_delay(min_delay=2, max_delay=4):
-    """Delay aleatorio para simular comportamiento humano"""
-    time.sleep(random.uniform(min_delay, max_delay))
-
-def extract_remate_data(driver):
-    """Extraer datos de remates de la página actual usando estructura real"""
-    page_remates = []
+def parse_precio_base(text_lines, start_index):
+    """Extraer precio base y moneda"""
+    precio_info = {
+        "precio_base_texto": "",
+        "moneda": "",
+        "monto": "",
+        "monto_numerico": 0
+    }
     
-    try:
-        # Buscar elementos que contengan información de remates
-        # Basado en el HTML real, los remates están en divs con texto específico
+    # Buscar líneas relacionadas con precio
+    for i in range(start_index, min(start_index + 5, len(text_lines))):
+        if i >= len(text_lines):
+            break
+            
+        line = text_lines[i].strip()
         
-        # Primero, buscar todos los elementos que contengan "Remate N°"
-        remate_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Remate N°')]")
-        logger.info(f"Elementos con 'Remate N°' encontrados: {len(remate_elements)}")
+        if "precio base" in line.lower():
+            precio_info["precio_base_texto"] = line
+            # La siguiente línea suele tener el monto
+            if i + 1 < len(text_lines):
+                next_line = text_lines[i + 1].strip()
+                if "s/." in next_line.lower() or "$" in next_line:
+                    precio_info["moneda"] = "PEN" if "s/." in next_line.lower() else "USD"
+                    precio_info["monto"] = next_line
+                    
+                    # Extraer número
+                    numbers = re.findall(r'[\d,]+\.?\d*', next_line.replace(',', ''))
+                    if numbers:
+                        try:
+                            precio_info["monto_numerico"] = float(numbers[0])
+                        except:
+                            precio_info["monto_numerico"] = 0
         
-        if not remate_elements:
-            # Buscar de otra forma - cualquier elemento con números de remate
-            remate_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'N°') and contains(text(), 'CONVOCATORIA')]")
-            logger.info(f"Elementos con patrón de convocatoria: {len(remate_elements)}")
-        
-        # Para cada elemento de remate encontrado, extraer información del contexto
-        for i, element in enumerate(remate_elements):
-            try:
-                # Obtener el contenedor padre que tiene toda la información del remate
-                parent_container = element
+        elif ("s/." in line.lower() or "$" in line) and any(char.isdigit() for char in line):
+            if not precio_info["monto"]:
+                precio_info["moneda"] = "PEN" if "s/." in line.lower() else "USD"
+                precio_info["monto"] = line
                 
-                # Buscar el contenedor más amplio que contenga toda la info del remate
-                for _ in range(5):  # Buscar hasta 5 niveles arriba
+                # Extraer número
+                numbers = re.findall(r'[\d,]+\.?\d*', line.replace(',', ''))
+                if numbers:
                     try:
-                        parent_container = parent_container.find_element(By.XPATH, "..")
-                        parent_text = parent_container.text
-                        
-                        # Si encontramos un contenedor con precio base, es el correcto
-                        if "Precio Base" in parent_text:
-                            break
+                        precio_info["monto_numerico"] = float(numbers[0])
                     except:
-                        break
+                        precio_info["monto_numerico"] = 0
+    
+    return precio_info
+
+def parse_fechas_y_estado(text_lines, start_index):
+    """Extraer fechas, estado y fase"""
+    fecha_info = {
+        "fecha_limite": "",
+        "hora_limite": "", 
+        "estado_proceso": "",
+        "fase_actual": "",
+        "convocatoria": ""
+    }
+    
+    for i in range(start_index, min(start_index + 10, len(text_lines))):
+        if i >= len(text_lines):
+            break
+            
+        line = text_lines[i].strip()
+        
+        # Detectar fechas (formato dd/mm/yyyy)
+        if re.match(r'\d{2}/\d{2}/\d{4}', line):
+            fecha_info["fecha_limite"] = line
+        
+        # Detectar horas (formato hh:mm AM/PM)
+        elif re.match(r'\d{1,2}:\d{2}\s*(AM|PM)', line):
+            fecha_info["hora_limite"] = line
+        
+        # Estados de proceso
+        elif "presentación de ofertas" in line.lower():
+            fecha_info["estado_proceso"] = line
+        elif "en proceso" in line.lower():
+            fecha_info["fase_actual"] = line
+        elif "publicación e inscripcion" in line.lower():
+            fecha_info["fase_actual"] = line
+        elif "convocatoria" in line.lower():
+            fecha_info["convocatoria"] = line
+    
+    return fecha_info
+
+def extract_detailed_remates(driver):
+    """Extraer remates con TODOS los detalles"""
+    try:
+        # Obtener todo el texto de la página
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        lines = [line.strip() for line in page_text.split('\n') if line.strip()]
+        
+        remates = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Detectar inicio de remate
+            if "remate n°" in line.lower() and "convocatoria" in line.lower():
+                logger.info(f"Procesando: {line}")
                 
-                # Extraer texto completo del contenedor
-                full_text = parent_container.text
-                lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-                
-                # Parsear información específica
-                remate_data = {
-                    "numero_remate": "",
-                    "convocatoria": "",
+                # Inicializar remate con estructura completa
+                remate = {
+                    # Información básica
+                    "numero_remate": line,
+                    "numero_remate_limpio": "",
+                    "tipo_convocatoria": "",
+                    "numero_convocatoria": "",
+                    
+                    # Tipo y clasificación
                     "tipo_remate": "",
-                    "ubicacion": "",
-                    "estado": "",
+                    "clasificacion": "",
+                    
+                    # Ubicación
+                    "ubicacion_distrito": "",
+                    "ubicacion_provincia": "", 
+                    "ubicacion_departamento": "",
+                    "ubicacion_completa": "",
+                    
+                    # Fechas y estado
                     "fecha_limite": "",
                     "hora_limite": "",
-                    "fase": "",
+                    "estado_proceso": "",
+                    "fase_actual": "",
+                    "situacion": "",
+                    
+                    # Descripción del bien
                     "descripcion_bien": "",
-                    "precio_base": "",
+                    "descripcion_completa": "",
+                    "tipo_inmueble": "",
+                    "area_terreno": "",
+                    "direccion_especifica": "",
+                    
+                    # Precio
+                    "precio_base_texto": "",
                     "moneda": "",
-                    "texto_completo": full_text,
-                    "lineas_parseadas": lines
+                    "monto": "",
+                    "monto_numerico": 0,
+                    
+                    # Información adicional
+                    "partida_registral": "",
+                    "zona_registral": "",
+                    "inscripcion_registral": "",
+                    
+                    # Enlaces y seguimiento
+                    "tiene_seguimiento": False,
+                    "tiene_detalle": False,
+                    "tiene_aviso": False,
+                    
+                    # Metadatos
+                    "texto_completo": "",
+                    "lineas_raw": []
                 }
                 
-                # Extraer datos específicos línea por línea
-                for j, line in enumerate(lines):
-                    line_lower = line.lower()
+                # Extraer número de remate limpio
+                numero_match = re.search(r'remate n°?\s*(\d+)', line.lower())
+                if numero_match:
+                    remate["numero_remate_limpio"] = numero_match.group(1)
+                
+                # Extraer tipo de convocatoria
+                if "primera convocatoria" in line.lower():
+                    remate["tipo_convocatoria"] = "PRIMERA CONVOCATORIA"
+                elif "segunda convocatoria" in line.lower():
+                    remate["tipo_convocatoria"] = "SEGUNDA CONVOCATORIA"
+                
+                # Recopilar las siguientes líneas para este remate
+                remate_lines = []
+                j = i + 1
+                
+                # Recopilar hasta encontrar el siguiente remate o llegar al final
+                while j < len(lines):
+                    next_line = lines[j].strip()
                     
-                    if "remate n°" in line_lower:
-                        remate_data["numero_remate"] = line
-                        # La siguiente línea suele ser el tipo de remate
-                        if j + 1 < len(lines):
-                            remate_data["tipo_remate"] = lines[j + 1]
-                        # La línea después suele ser la ubicación
-                        if j + 2 < len(lines):
-                            remate_data["ubicacion"] = lines[j + 2]
+                    # Si encontramos otro remate, parar
+                    if "remate n°" in next_line.lower() and "convocatoria" in next_line.lower():
+                        break
                     
-                    elif "presentación de ofertas" in line_lower:
-                        remate_data["estado"] = line
+                    # Si encontramos indicadores de fin de remate
+                    if next_line.lower() in ["seguimiento", "detalle", "aviso"] and j + 1 < len(lines):
+                        # Estas son las últimas líneas del remate
+                        remate_lines.append(next_line)
+                        
+                        # Marcar que tiene estos elementos
+                        if "seguimiento" in next_line.lower():
+                            remate["tiene_seguimiento"] = True
+                        if "detalle" in next_line.lower():
+                            remate["tiene_detalle"] = True
+                        if "aviso" in next_line.lower():
+                            remate["tiene_aviso"] = True
+                        
+                        # Saltar estas líneas finales
+                        while j + 1 < len(lines) and lines[j + 1].strip().lower() in ["seguimiento", "detalle", "aviso"]:
+                            j += 1
+                            if j < len(lines):
+                                final_line = lines[j].strip()
+                                if final_line.lower() in ["seguimiento", "detalle", "aviso"]:
+                                    if "seguimiento" in final_line.lower():
+                                        remate["tiene_seguimiento"] = True
+                                    if "detalle" in final_line.lower():
+                                        remate["tiene_detalle"] = True
+                                    if "aviso" in final_line.lower():
+                                        remate["tiene_aviso"] = True
+                        break
                     
-                    elif any(month in line for month in ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]) and "/" in line:
-                        if ":" not in line:  # Es fecha, no hora
-                            remate_data["fecha_limite"] = line
-                        else:  # Es hora
-                            remate_data["hora_limite"] = line
+                    remate_lines.append(next_line)
+                    j += 1
+                
+                # Guardar líneas raw
+                remate["lineas_raw"] = remate_lines
+                remate["texto_completo"] = "\n".join([line] + remate_lines)
+                
+                # Procesar líneas para extraer detalles
+                for idx, rline in enumerate(remate_lines):
+                    rline = rline.strip()
                     
-                    elif "precio base" in line_lower:
-                        remate_data["precio_base"] = line
-                        # La siguiente línea suele tener la moneda y monto
-                        if j + 1 < len(lines):
-                            next_line = lines[j + 1]
-                            if "s/." in next_line or "$" in next_line:
-                                remate_data["moneda"] = "PEN" if "s/." in next_line else "USD"
-                                remate_data["precio_base"] = next_line
+                    # Tipo de remate (primera línea después del número)
+                    if idx == 0 and ("remate" in rline.lower() or "simple" in rline.lower()):
+                        remate["tipo_remate"] = rline
                     
-                    elif len(line) > 50 and not any(keyword in line_lower for keyword in ["remate", "precio", "seguimiento", "detalle", "aviso"]):
-                        # Línea larga sin palabras clave, probablemente descripción del bien
-                        if not remate_data["descripcion_bien"]:
-                            remate_data["descripcion_bien"] = line
+                    # Ubicación (segunda línea generalmente)
+                    elif idx == 1 and len(rline) > 3 and rline.isupper():
+                        remate["ubicacion_distrito"] = rline
+                        remate["ubicacion_completa"] = rline
+                    
+                    # Estados y fechas
+                    elif "presentación de ofertas" in rline.lower():
+                        remate["estado_proceso"] = rline
+                    elif re.match(r'\d{2}/\d{2}/\d{4}', rline):
+                        remate["fecha_limite"] = rline
+                    elif re.match(r'\d{1,2}:\d{2}\s*(AM|PM)', rline):
+                        remate["hora_limite"] = rline
+                    elif "en proceso" in rline.lower():
+                        remate["situacion"] = rline
+                    elif "publicación e inscripcion" in rline.lower():
+                        remate["fase_actual"] = rline
+                    
+                    # Descripción del bien (líneas largas)
+                    elif len(rline) > 50 and not any(keyword in rline.lower() for keyword in 
+                                                   ['precio', 'seguimiento', 'detalle', 'aviso', 'remate']):
+                        if not remate["descripcion_bien"]:
+                            remate["descripcion_bien"] = rline
+                            remate["descripcion_completa"] = rline
+                            
+                            # Extraer detalles específicos de la descripción
+                            if "área de" in rline.lower():
+                                area_match = re.search(r'área de ([\d,\.]+\s*m2?)', rline.lower())
+                                if area_match:
+                                    remate["area_terreno"] = area_match.group(1)
+                            
+                            # Extraer tipo de inmueble de la descripción
+                            tipos_inmueble = ['casa', 'departamento', 'terreno', 'local', 'oficina', 'estacionamiento']
+                            for tipo in tipos_inmueble:
+                                if tipo in rline.lower():
+                                    remate["tipo_inmueble"] = tipo.upper()
+                                    break
+                            
+                            # Extraer información registral
+                            if "partida" in rline.lower():
+                                partida_match = re.search(r'partida.*?n[°º]?\s*([\d\-]+)', rline.lower())
+                                if partida_match:
+                                    remate["partida_registral"] = partida_match.group(1)
+                            
+                            if "zona registral" in rline.lower():
+                                zona_match = re.search(r'zona registral.*?n[°º]?\s*([\w\s]+?)(?:\s*–|\s*-|$)', rline.lower())
+                                if zona_match:
+                                    remate["zona_registral"] = zona_match.group(1).strip()
+                
+                # Extraer información de precio
+                precio_info = parse_precio_base(remate_lines, 0)
+                remate.update(precio_info)
+                
+                # Extraer fechas y estado adicional
+                fecha_info = parse_fechas_y_estado(remate_lines, 0)
+                remate.update(fecha_info)
                 
                 # Solo agregar si tiene información sustancial
-                if remate_data["numero_remate"] and any(remate_data[key] for key in ["ubicacion", "precio_base", "descripcion_bien"]):
-                    remate_data["index_en_pagina"] = i + 1
-                    remate_data["scraped_at"] = datetime.now().isoformat()
-                    page_remates.append(remate_data)
+                if (remate["numero_remate_limpio"] and 
+                    (remate["descripcion_bien"] or remate["ubicacion_distrito"] or remate["monto"])):
                     
-            except Exception as e:
-                logger.warning(f"Error procesando remate {i}: {e}")
-                continue
+                    remates.append(remate)
+                    logger.info(f"✅ Remate agregado: {remate['numero_remate_limpio']} - {remate['ubicacion_distrito']}")
+                else:
+                    logger.warning(f"⚠️ Remate descartado por falta de datos: {line}")
+                
+                # Continuar desde donde terminamos
+                i = j
+            else:
+                i += 1
         
-        # Si no encontramos remates con el método anterior, usar método alternativo
-        if not page_remates:
-            logger.info("Método alternativo: buscando por precio base...")
-            
-            # Buscar elementos que contengan "Precio Base"
-            precio_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Precio Base')]")
-            
-            for i, element in enumerate(precio_elements):
-                try:
-                    # Obtener el contenedor padre
-                    parent = element.find_element(By.XPATH, "../..")
-                    text = parent.text
-                    
-                    if "Remate N°" in text:
-                        simple_remate = {
-                            "numero_remate": f"Remate_encontrado_{i+1}",
-                            "texto_completo": text,
-                            "metodo_extraccion": "precio_base_search",
-                            "index_en_pagina": i + 1,
-                            "scraped_at": datetime.now().isoformat()
-                        }
-                        page_remates.append(simple_remate)
-                        
-                except Exception as e:
-                    continue
-        
-        logger.info(f"✅ Remates extraídos de la página: {len(page_remates)}")
-        return page_remates
+        logger.info(f"Total remates procesados: {len(remates)}")
+        return remates
         
     except Exception as e:
-        logger.error(f"❌ Error en extract_remate_data: {e}")
+        logger.error(f"Error en extract_detailed_remates: {e}")
         return []
 
-def change_rows_per_page(driver, rows=12):
-    """Cambiar a mostrar más filas por página"""
-    try:
-        logger.info(f"Intentando cambiar a {rows} filas por página...")
-        
-        # Buscar el control "Rows Per Page"
-        rows_selectors = [
-            f"//select[contains(@class, 'rows')]/option[@value='{rows}']",
-            f"//select/option[text()='{rows}']",
-            f"//option[@value='{rows}']",
-            f"//*[text()='{rows}' and contains(@onclick, 'rows')]"
-        ]
-        
-        for selector in rows_selectors:
-            try:
-                element = driver.find_element(By.XPATH, selector)
-                if element.is_displayed():
-                    element.click()
-                    logger.info(f"✅ Cambiado a {rows} filas por página")
-                    human_like_delay(3, 5)  # Esperar que recargue
-                    return True
-            except:
-                continue
-                
-        logger.warning(f"No se pudo cambiar a {rows} filas por página")
-        return False
-        
-    except Exception as e:
-        logger.warning(f"Error cambiando filas por página: {e}")
-        return False
-
-def find_next_page_button(driver):
-    """Encontrar botón de página siguiente"""
-    try:
-        # Basado en el HTML real, buscar botones de paginación
-        next_selectors = [
-            "//a[text()='N']",  # Botón "N" (Next) visible en el HTML
-            "//a[contains(@onclick, 'next')]",
-            "//a[text()='>']",
-            "//a[text()='»']",
-            "//*[@title='Next Page']",
-            "//*[@title='Siguiente']"
-        ]
-        
-        for selector in next_selectors:
-            try:
-                element = driver.find_element(By.XPATH, selector)
-                if element.is_displayed() and element.is_enabled():
-                    # Verificar que no esté deshabilitado
-                    classes = element.get_attribute('class') or ''
-                    if 'disabled' not in classes.lower():
-                        return element
-            except:
-                continue
-                
-        # Buscar por números de página (2, 3, 4, etc.)
-        current_page_info = driver.page_source
-        
-        # Extraer número de página actual y buscar siguiente
-        for page_num in range(2, 70):  # Buscar hasta página 70
-            try:
-                page_link = driver.find_element(By.XPATH, f"//a[text()='{page_num}']")
-                if page_link.is_displayed() and page_link.is_enabled():
-                    return page_link
-            except:
-                continue
-                
-        return None
-        
-    except Exception as e:
-        logger.warning(f"Error buscando botón siguiente: {e}")
-        return None
-
-def scrape_with_pagination(driver):
-    """Scraper principal con paginación para REMAJU"""
+def scrape_limited_pages(driver, max_pages=10):
+    """Scraper con detalles completos"""
     all_remates = []
     current_page = 1
-    max_pages = 70  # Basado en 267 registros / ~4 por página
-    
-    # Primero intentar cambiar a más registros por página
-    change_rows_per_page(driver, 12)
     
     while current_page <= max_pages:
-        logger.info(f"📄 Scrapeando página {current_page}...")
+        logger.info(f"📄 Página {current_page}/{max_pages}")
         
-        # Esperar que cargue el contenido
-        human_like_delay(3, 5)
+        # Esperar carga
+        time.sleep(3)
         
-        # Extraer datos de la página actual
-        page_data = extract_remate_data(driver)
+        # Extraer datos detallados
+        page_remates = extract_detailed_remates(driver)
         
-        if page_data:
-            logger.info(f"✅ Página {current_page}: {len(page_data)} remates encontrados")
-            
-            # Agregar metadata a cada remate
-            for i, remate in enumerate(page_data):
+        if page_remates:
+            for idx, remate in enumerate(page_remates):
                 remate['pagina'] = current_page
-                remate['index_global'] = len(all_remates) + i + 1
+                remate['index_en_pagina'] = idx + 1
+                remate['index_global'] = len(all_remates) + idx + 1
+                remate['scraped_at'] = datetime.now().isoformat()
             
-            all_remates.extend(page_data)
+            all_remates.extend(page_remates)
+            logger.info(f"✅ Página {current_page}: {len(page_remates)} remates detallados")
         else:
-            logger.warning(f"❌ Página {current_page}: No se encontraron datos")
+            logger.warning(f"❌ Página {current_page}: Sin datos")
+        
+        # Navegación a siguiente página
+        try:
+            next_found = False
             
-            # Si no hay datos en 2 páginas consecutivas, probablemente terminamos
-            if current_page > 1:
-                logger.info("No hay más datos. Finalizando scraping.")
-                break
-        
-        # Buscar botón siguiente
-        next_button = find_next_page_button(driver)
-        
-        if next_button:
-            try:
-                logger.info(f"🔄 Navegando a página {current_page + 1}...")
-                
-                # Scroll hasta el botón
-                driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
-                human_like_delay(1, 2)
-                
-                # Clic en el botón
+            # Método 1: Buscar número específico de página
+            for page_num in range(current_page + 1, current_page + 3):
                 try:
-                    next_button.click()
-                except ElementClickInterceptedException:
-                    driver.execute_script("arguments[0].click();", next_button)
-                
-                # Esperar que cambie la página
-                human_like_delay(5, 7)
-                current_page += 1
-                
-            except Exception as e:
-                logger.error(f"❌ Error navegando: {e}")
+                    next_link = driver.find_element(By.XPATH, f"//a[text()='{page_num}']")
+                    if next_link.is_displayed() and next_link.is_enabled():
+                        logger.info(f"🔄 Navegando a página {page_num}")
+                        next_link.click()
+                        next_found = True
+                        break
+                except:
+                    continue
+            
+            # Método 2: Buscar botón "N" (Next)
+            if not next_found:
+                try:
+                    next_btn = driver.find_element(By.XPATH, "//a[text()='N']")
+                    if next_btn.is_displayed() and next_btn.is_enabled():
+                        logger.info("🔄 Navegando con botón N")
+                        next_btn.click()
+                        next_found = True
+                except:
+                    pass
+            
+            if not next_found:
+                logger.info("🏁 No hay más páginas disponibles")
                 break
-        else:
-            logger.info("🏁 No se encontró botón siguiente. Fin de paginación.")
+                
+            current_page += 1
+            time.sleep(4)  # Esperar carga de nueva página
+            
+        except Exception as e:
+            logger.error(f"Error navegando: {e}")
             break
     
     return all_remates, current_page - 1
 
 def scrape_remaju():
-    """Función principal de scraping REMAJU"""
+    """Función principal con detalles completos"""
     driver = None
     url = "https://remaju.pj.gob.pe/remaju/pages/publico/remateExterno.xhtml"
     
     try:
-        logger.info("🚀 Iniciando scraping de REMAJU (estructura real)...")
+        max_pages = int(os.getenv('MAX_PAGES', '10'))
+        logger.info(f"🚀 Iniciando scraping detallado - máximo {max_pages} páginas")
+        
         driver = setup_driver()
+        driver.set_page_load_timeout(30)
         
         logger.info(f"Navegando a: {url}")
         driver.get(url)
+        time.sleep(6)
         
-        # Esperar carga inicial
-        logger.info("Esperando carga inicial...")
-        human_like_delay(5, 8)
-        
-        # Verificar título
         page_title = driver.title
         logger.info(f"Título: {page_title}")
         
-        # Realizar scraping con paginación
-        all_remates, total_pages = scrape_with_pagination(driver)
+        # Scraping con detalles completos
+        all_remates, total_pages = scrape_limited_pages(driver, max_pages)
         
-        # Crear resultado
+        # Estadísticas adicionales
+        remates_con_precio = len([r for r in all_remates if r.get('monto_numerico', 0) > 0])
+        remates_con_descripcion = len([r for r in all_remates if r.get('descripcion_bien')])
+        
+        # Crear resultado final
         resultado = {
-            "status": "success" if all_remates else "success_no_data",
+            "status": "success" if all_remates else "partial_success",
             "timestamp": datetime.now().isoformat(),
             "url_scraped": url,
-            "page_title": page_title,
-            "total_remates": len(all_remates),
+            "scraping_mode": "detailed_extraction",
+            "max_pages_configured": max_pages,
             "total_pages_scraped": total_pages,
+            "estadisticas": {
+                "total_remates": len(all_remates),
+                "remates_con_precio": remates_con_precio,
+                "remates_con_descripcion": remates_con_descripcion,
+                "porcentaje_completitud_precio": round((remates_con_precio/len(all_remates)*100) if all_remates else 0, 2),
+                "porcentaje_completitud_descripcion": round((remates_con_descripcion/len(all_remates)*100) if all_remates else 0, 2)
+            },
+            "estructura_campos": {
+                "basicos": ["numero_remate", "tipo_remate", "ubicacion_distrito"],
+                "fechas": ["fecha_limite", "hora_limite", "estado_proceso", "fase_actual"], 
+                "ubicacion": ["ubicacion_distrito", "ubicacion_provincia", "ubicacion_departamento", "direccion_especifica"],
+                "descripcion": ["descripcion_bien", "tipo_inmueble", "area_terreno"],
+                "precio": ["precio_base_texto", "moneda", "monto", "monto_numerico"],
+                "registral": ["partida_registral", "zona_registral"],
+                "metadatos": ["pagina", "index_global", "scraped_at"]
+            },
             "remates": all_remates
         }
         
@@ -375,11 +461,18 @@ def scrape_remaju():
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(resultado, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"✅ Scraping completado: {len(all_remates)} remates, {total_pages} páginas")
+        # Crear backup
+        backup_file = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(backup_file, 'w', encoding='utf-8') as f:
+            json.dump(resultado, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"✅ Completado: {len(all_remates)} remates con detalles completos")
+        logger.info(f"📊 Estadísticas: {remates_con_precio} con precio, {remates_con_descripcion} con descripción")
+        logger.info(f"📁 Archivos: {output_file}, {backup_file}")
         
         # Outputs para GitHub Actions
         print(f"total_remates={len(all_remates)}")
-        print(f"total_pages={total_pages}")
+        print(f"remates_con_precio={remates_con_precio}")
         print(f"status=success")
         
         return resultado
@@ -388,17 +481,17 @@ def scrape_remaju():
         error_result = {
             "status": "error",
             "timestamp": datetime.now().isoformat(),
-            "error_message": str(e),
-            "error_type": type(e).__name__,
-            "url_attempted": url
+            "error": str(e),
+            "url": url
         }
         
-        logger.error(f"❌ Error: {e}")
-        
-        with open('remates_result.json', 'w', encoding='utf-8') as f:
+        error_file = "remates_result.json"
+        with open(error_file, 'w', encoding='utf-8') as f:
             json.dump(error_result, f, ensure_ascii=False, indent=2)
         
+        logger.error(f"❌ Error: {e}")
         print(f"status=error")
+        
         return error_result
         
     finally:
@@ -408,5 +501,7 @@ def scrape_remaju():
 if __name__ == "__main__":
     result = scrape_remaju()
     print("=" * 60)
-    print("RESULTADO FINAL:")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(f"Resultado: {result.get('status', 'unknown')}")
+    print(f"Total remates: {result.get('estadisticas', {}).get('total_remates', 0)}")
+    print(f"Con precio: {result.get('estadisticas', {}).get('remates_con_precio', 0)}")
+    print(f"Con descripción: {result.get('estadisticas', {}).get('remates_con_descripcion', 0)}")
