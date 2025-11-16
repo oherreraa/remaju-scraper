@@ -52,7 +52,7 @@ jobs:
       if: always()
       with:
         name: remaju-results-${{ github.run_number }}
-        path: remates_result.json
+        path: "*.json"  
         retention-days: 7
         
     - name: Display results summary
