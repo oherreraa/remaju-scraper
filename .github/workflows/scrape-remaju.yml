@@ -1,7 +1,7 @@
 name: REMAJU Scraper
 
 on:
-  workflow_dispatch:  # Permite ejecución manual desde n8n
+  workflow_dispatch:
     inputs:
       trigger_source:
         description: 'Source that triggered this workflow'
@@ -18,10 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     
-    outputs:
-      total_remates: ${{ steps.scraper.outputs.total_remates }}
-      status: ${{ steps.scraper.outputs.status }}
-      
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -53,7 +49,7 @@ jobs:
         
     - name: Upload results as artifact
       uses: actions/upload-artifact@v4
-      if: always()  # Siempre subir, incluso si hay error
+      if: always()
       with:
         name: remaju-results-${{ github.run_number }}
         path: remates_result.json
@@ -64,14 +60,7 @@ jobs:
       run: |
         if [ -f remates_result.json ]; then
           echo "📊 Resumen de resultados:"
-          python -c "
-          import json
-          with open('remates_result.json', 'r') as f:
-              data = json.load(f)
-          print(f'Status: {data.get(\"status\", \"unknown\")}')
-          print(f'Total remates: {data.get(\"total_remates\", 0)}')
-          if data.get('status') == 'error':
-              print(f'Error: {data.get(\"error_message\", \"Unknown error\")}')
-          "
+          cat remates_result.json
         else
           echo "❌ No se encontró archivo de resultados"
+        fi
