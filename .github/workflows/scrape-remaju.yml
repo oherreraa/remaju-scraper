@@ -1,0 +1,77 @@
+name: REMAJU Scraper
+
+on:
+  workflow_dispatch:  # Permite ejecución manual desde n8n
+    inputs:
+      trigger_source:
+        description: 'Source that triggered this workflow'
+        required: false
+        default: 'n8n'
+      debug_mode:
+        description: 'Enable debug mode'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    outputs:
+      total_remates: ${{ steps.scraper.outputs.total_remates }}
+      status: ${{ steps.scraper.outputs.status }}
+      
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install Chromium Browser
+      uses: browser-actions/setup-chrome@v1
+      with:
+        chrome-version: 'stable'
+        
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run REMAJU scraper
+      id: scraper
+      run: |
+        echo "🚀 Iniciando scraping..."
+        python scraper.py
+        echo "✅ Scraping completado"
+      env:
+        PYTHONUNBUFFERED: 1
+        
+    - name: Upload results as artifact
+      uses: actions/upload-artifact@v4
+      if: always()  # Siempre subir, incluso si hay error
+      with:
+        name: remaju-results-${{ github.run_number }}
+        path: remates_result.json
+        retention-days: 7
+        
+    - name: Display results summary
+      if: always()
+      run: |
+        if [ -f remates_result.json ]; then
+          echo "📊 Resumen de resultados:"
+          python -c "
+          import json
+          with open('remates_result.json', 'r') as f:
+              data = json.load(f)
+          print(f'Status: {data.get(\"status\", \"unknown\")}')
+          print(f'Total remates: {data.get(\"total_remates\", 0)}')
+          if data.get('status') == 'error':
+              print(f'Error: {data.get(\"error_message\", \"Unknown error\")}')
+          "
+        else
+          echo "❌ No se encontró archivo de resultados"
