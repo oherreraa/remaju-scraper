@@ -41,47 +41,55 @@ def setup_driver():
     
     return driver
 
-def extract_precio_from_lines(lines):
-    """Extraer precio de las líneas de texto"""
-    precio_data = {"moneda": "", "monto": "", "monto_numerico": 0}
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
+def change_to_more_results_per_page(driver):
+    """Cambiar a mostrar más resultados por página (12 en lugar de 4)"""
+    try:
+        logger.info("Intentando cambiar a 12 resultados por página...")
         
-        # Buscar línea "Precio Base"
-        if "precio base" in line.lower():
-            # La siguiente línea debería tener el precio
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                if "s/." in next_line or "$" in next_line:
-                    precio_data["moneda"] = "PEN" if "s/." in next_line else "USD"
-                    precio_data["monto"] = next_line
-                    
-                    # Extraer número
-                    numbers = re.findall(r'[\d,]+\.?\d*', next_line.replace(',', ''))
-                    if numbers:
-                        try:
-                            precio_data["monto_numerico"] = float(numbers[0])
-                        except:
-                            pass
+        # Buscar el dropdown "Rows Per Page"
+        selectors = [
+            "//select[contains(@class, 'rows')]",
+            "//select[following-sibling::text()[contains(., 'Per Page')]]",
+            "//select[preceding-sibling::text()[contains(., 'Rows')]]",
+            "//select[contains(@onchange, 'rows')]",
+            "//select[contains(@name, 'rows')]"
+        ]
         
-        # También buscar directamente líneas con precio
-        elif ("s/." in line or "$" in line) and any(c.isdigit() for c in line):
-            if not precio_data["monto"]:
-                precio_data["moneda"] = "PEN" if "s/." in line else "USD"
-                precio_data["monto"] = line
-                
-                numbers = re.findall(r'[\d,]+\.?\d*', line.replace(',', ''))
-                if numbers:
-                    try:
-                        precio_data["monto_numerico"] = float(numbers[0])
-                    except:
-                        pass
-    
-    return precio_data
+        for selector in selectors:
+            try:
+                select_element = driver.find_element(By.XPATH, selector)
+                if select_element.is_displayed():
+                    # Buscar opción de 12
+                    options = select_element.find_elements(By.TAG_NAME, "option")
+                    for option in options:
+                        if option.text.strip() == "12":
+                            logger.info("✅ Cambiando a 12 resultados por página")
+                            option.click()
+                            time.sleep(5)  # Esperar que recargue
+                            return True
+            except:
+                continue
+        
+        # Método alternativo: buscar directamente la opción 12
+        try:
+            option_12 = driver.find_element(By.XPATH, "//option[@value='12' or text()='12']")
+            if option_12.is_displayed():
+                logger.info("✅ Encontrada opción 12, seleccionando...")
+                option_12.click()
+                time.sleep(5)
+                return True
+        except:
+            pass
+        
+        logger.warning("No se pudo cambiar a 12 resultados por página")
+        return False
+        
+    except Exception as e:
+        logger.warning(f"Error cambiando resultados por página: {e}")
+        return False
 
 def extract_remates_clean(driver):
-    """Extraer remates con estructura limpia y sin redundancias"""
+    """Extraer remates con estructura limpia"""
     try:
         page_text = driver.find_element(By.TAG_NAME, "body").text
         lines = [line.strip() for line in page_text.split('\n') if line.strip()]
@@ -95,7 +103,7 @@ def extract_remates_clean(driver):
             # Detectar inicio de remate
             if "remate n°" in line.lower() and "convocatoria" in line.lower():
                 
-                # Estructura limpia - solo campos esenciales
+                # Estructura limpia
                 remate = {
                     "numero_remate": "",
                     "numero": "",
@@ -174,6 +182,35 @@ def extract_remates_clean(driver):
                     elif re.match(r'\d{1,2}:\d{2}\s*(AM|PM)', rline):
                         remate["hora"] = rline
                     
+                    # Precio
+                    elif "precio base" in rline.lower():
+                        # Siguiente línea debería tener el precio
+                        if idx + 1 < len(remate_lines):
+                            next_price_line = remate_lines[idx + 1].strip()
+                            if "s/." in next_price_line or "$" in next_price_line:
+                                remate["precio_moneda"] = "PEN" if "s/." in next_price_line else "USD"
+                                remate["precio_monto"] = next_price_line
+                                
+                                # Extraer número
+                                numbers = re.findall(r'[\d,]+\.?\d*', next_price_line.replace(',', ''))
+                                if numbers:
+                                    try:
+                                        remate["precio_numerico"] = float(numbers[0])
+                                    except:
+                                        pass
+                    
+                    # Precio directo (si no se encontró con "precio base")
+                    elif ("s/." in rline or "$" in rline) and any(c.isdigit() for c in rline) and not remate["precio_monto"]:
+                        remate["precio_moneda"] = "PEN" if "s/." in rline else "USD"
+                        remate["precio_monto"] = rline
+                        
+                        numbers = re.findall(r'[\d,]+\.?\d*', rline.replace(',', ''))
+                        if numbers:
+                            try:
+                                remate["precio_numerico"] = float(numbers[0])
+                            except:
+                                pass
+                    
                     # Descripción del bien (líneas largas)
                     elif len(rline) > 50 and not any(keyword in rline.lower() for keyword in 
                                                    ['precio', 'seguimiento', 'detalle', 'aviso', 'remate', 'presentación']):
@@ -204,12 +241,6 @@ def extract_remates_clean(driver):
                             if zona_match:
                                 remate["zona_registral"] = zona_match.group(1).strip()
                 
-                # Extraer información de precio
-                precio_info = extract_precio_from_lines(remate_lines)
-                remate["precio_moneda"] = precio_info["moneda"]
-                remate["precio_monto"] = precio_info["monto"]
-                remate["precio_numerico"] = precio_info["monto_numerico"]
-                
                 # Solo agregar si tiene datos esenciales
                 if (remate["numero"] and 
                     (remate["descripcion"] or remate["ubicacion"] or remate["precio_monto"])):
@@ -229,65 +260,123 @@ def extract_remates_clean(driver):
         logger.error(f"Error en extract_remates_clean: {e}")
         return []
 
-def get_total_available_pages(driver):
-    """Obtener el total de páginas disponibles"""
+def navigate_to_next_page(driver, current_page):
+    """Navegación robusta a la siguiente página"""
+    next_page_num = current_page + 1
+    
+    logger.info(f"🔄 Intentando navegar de página {current_page} a {next_page_num}")
+    
+    # Método 1: Clic directo en número de página
     try:
-        # Buscar todos los enlaces de paginación
-        page_links = driver.find_elements(By.XPATH, "//a[text()>='1' and text()<='100']")
-        page_numbers = []
+        # Buscar enlace de la siguiente página
+        next_page_link = driver.find_element(By.XPATH, f"//a[text()='{next_page_num}']")
+        if next_page_link.is_displayed():
+            classes = next_page_link.get_attribute('class') or ''
+            if 'disabled' not in classes.lower() and 'inactive' not in classes.lower():
+                # Scroll al elemento
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_page_link)
+                time.sleep(1)
+                
+                # Clic
+                driver.execute_script("arguments[0].click();", next_page_link)
+                logger.info(f"✅ Navegación exitosa a página {next_page_num} (método directo)")
+                return True
+    except Exception as e:
+        logger.debug(f"Método 1 falló: {e}")
+    
+    # Método 2: Buscar botón "N" (Next)
+    try:
+        next_btn = driver.find_element(By.XPATH, "//a[text()='N' or text()='»' or text()='>']")
+        if next_btn.is_displayed():
+            classes = next_btn.get_attribute('class') or ''
+            if 'disabled' not in classes.lower():
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_btn)
+                time.sleep(1)
+                driver.execute_script("arguments[0].click();", next_btn)
+                logger.info("✅ Navegación exitosa con botón 'N' (método 2)")
+                return True
+    except Exception as e:
+        logger.debug(f"Método 2 falló: {e}")
+    
+    # Método 3: Buscar cualquier enlace con onclick que contenga paginación
+    try:
+        pagination_links = driver.find_elements(By.XPATH, "//a[contains(@onclick, 'page') or contains(@onclick, 'Page')]")
+        for link in pagination_links:
+            if link.is_displayed():
+                onclick = link.get_attribute('onclick') or ''
+                # Buscar si contiene el número de página que queremos
+                if str(next_page_num) in onclick:
+                    driver.execute_script("arguments[0].click();", link)
+                    logger.info(f"✅ Navegación exitosa con onclick a página {next_page_num} (método 3)")
+                    return True
+    except Exception as e:
+        logger.debug(f"Método 3 falló: {e}")
+    
+    # Método 4: JavaScript directo para cambiar página
+    try:
+        # Intentar diferentes funciones JavaScript comunes
+        js_functions = [
+            f"window.location.href = window.location.href + '&page={next_page_num}';",
+            f"if(typeof(PrimeFaces) !== 'undefined') {{ PrimeFaces.ab({{source:'page{next_page_num}',process:'@this'}}); }}",
+            f"if(typeof(changePage) === 'function') {{ changePage({next_page_num}); }}",
+        ]
         
-        for link in page_links:
+        for js_func in js_functions:
             try:
-                page_num = int(link.text)
-                page_numbers.append(page_num)
+                driver.execute_script(js_func)
+                logger.info(f"✅ Navegación exitosa con JavaScript a página {next_page_num} (método 4)")
+                return True
             except:
                 continue
-        
-        if page_numbers:
-            max_page = max(page_numbers)
-            logger.info(f"📄 Máximo número de página detectado: {max_page}")
-            return max_page
-        
-        # Método alternativo: buscar en el texto de la página
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        
-        # Buscar "Total: X registros"
-        total_match = re.search(r'total:\s*(\d+)\s*registros', page_text.lower())
-        if total_match:
-            total_records = int(total_match.group(1))
-            estimated_pages = (total_records // 4) + 1  # 4 remates por página aprox
-            logger.info(f"📊 Total registros: {total_records}, páginas estimadas: {estimated_pages}")
-            return estimated_pages
-        
-        logger.warning("No se pudo determinar el total de páginas")
-        return 100  # Valor por defecto conservador
-        
     except Exception as e:
-        logger.warning(f"Error determinando total de páginas: {e}")
-        return 100
+        logger.debug(f"Método 4 falló: {e}")
+    
+    # Método 5: Buscar INPUT de página y cambiarlo
+    try:
+        page_input = driver.find_element(By.XPATH, "//input[@type='text' and (@value='{0}' or @placeholder='página')]".format(current_page))
+        if page_input.is_displayed():
+            page_input.clear()
+            page_input.send_keys(str(next_page_num))
+            
+            # Buscar botón "Go" o similar
+            go_buttons = driver.find_elements(By.XPATH, "//button[text()='Go' or text()='Ir'] | //input[@type='submit' and @value='Go']")
+            for btn in go_buttons:
+                if btn.is_displayed():
+                    btn.click()
+                    logger.info(f"✅ Navegación exitosa con input de página {next_page_num} (método 5)")
+                    return True
+    except Exception as e:
+        logger.debug(f"Método 5 falló: {e}")
+    
+    logger.warning(f"❌ No se pudo navegar a página {next_page_num}")
+    return False
 
-def scrape_all_pages_improved(driver):
-    """Scraper mejorado para obtener TODAS las páginas"""
+def scrape_all_pages_aggressive(driver):
+    """Scraper agresivo para obtener TODOS los registros"""
     all_remates = []
     current_page = 1
-    max_pages = get_total_available_pages(driver)
-    consecutive_failures = 0
-    max_consecutive_failures = 5
     
-    logger.info(f"🚀 Iniciando scraping completo - estimado hasta página {max_pages}")
+    # Primero intentar cambiar a más resultados por página
+    change_to_more_results_per_page(driver)
     
-    while current_page <= max_pages and consecutive_failures < max_consecutive_failures:
-        logger.info(f"📄 Procesando página {current_page}/{max_pages} " +
-                   f"(Total remates: {len(all_remates)})")
+    # Límite de seguridad muy alto
+    max_pages = 100
+    pages_without_data = 0
+    max_pages_without_data = 3
+    
+    logger.info(f"🚀 Iniciando scraping agresivo - hasta {max_pages} páginas")
+    
+    while current_page <= max_pages:
+        logger.info(f"📄 Procesando página {current_page} (Total remates acumulados: {len(all_remates)})")
         
         # Esperar carga mínima
-        time.sleep(2)
+        time.sleep(1)
         
         # Extraer remates de la página actual
         page_remates = extract_remates_clean(driver)
         
         if page_remates:
-            consecutive_failures = 0  # Reset contador
+            pages_without_data = 0  # Reset contador
             
             # Agregar metadata
             for idx, remate in enumerate(page_remates):
@@ -297,152 +386,77 @@ def scrape_all_pages_improved(driver):
             
             all_remates.extend(page_remates)
             logger.info(f"✅ Página {current_page}: {len(page_remates)} remates " +
-                       f"(Acumulado: {len(all_remates)})")
+                       f"(Total acumulado: {len(all_remates)})")
         else:
-            consecutive_failures += 1
+            pages_without_data += 1
             logger.warning(f"❌ Página {current_page}: Sin datos " +
-                         f"(Fallos consecutivos: {consecutive_failures})")
-        
-        # Si llegamos al máximo de fallos consecutivos
-        if consecutive_failures >= max_consecutive_failures:
-            logger.info(f"🏁 {max_consecutive_failures} páginas sin datos. Terminando scraping.")
-            break
-        
-        # Navegar a la siguiente página
-        navigation_success = False
-        
-        # Método 1: Buscar número específico de página siguiente
-        try:
-            next_page_num = current_page + 1
-            next_link = driver.find_element(By.XPATH, f"//a[text()='{next_page_num}']")
-            if next_link.is_displayed():
-                classes = next_link.get_attribute('class') or ''
-                if 'disabled' not in classes.lower() and 'inactive' not in classes.lower():
-                    logger.info(f"🔄 Navegando a página {next_page_num}")
-                    
-                    # Scroll al elemento primero
-                    driver.execute_script("arguments[0].scrollIntoView(true);", next_link)
-                    time.sleep(1)
-                    
-                    # Clic
-                    next_link.click()
-                    navigation_success = True
-        except Exception as e:
-            logger.debug(f"Método 1 falló: {e}")
-        
-        # Método 2: Buscar botón "N" (Next)
-        if not navigation_success:
-            try:
-                next_btn = driver.find_element(By.XPATH, "//a[text()='N']")
-                if next_btn.is_displayed():
-                    classes = next_btn.get_attribute('class') or ''
-                    if 'disabled' not in classes.lower():
-                        logger.info("🔄 Usando botón 'N' para navegar")
-                        driver.execute_script("arguments[0].scrollIntoView(true);", next_btn)
-                        time.sleep(1)
-                        next_btn.click()
-                        navigation_success = True
-            except Exception as e:
-                logger.debug(f"Método 2 falló: {e}")
-        
-        # Método 3: JavaScript para ir a página específica
-        if not navigation_success:
-            try:
-                next_page_num = current_page + 1
-                logger.info(f"🔄 Intentando navegación JavaScript a página {next_page_num}")
-                
-                # Buscar función de paginación en JavaScript
-                js_nav_scripts = [
-                    f"window.location.href = window.location.href.replace(/page=\\d+/, 'page={next_page_num}');",
-                    f"document.querySelector('a[onclick*=\"page={next_page_num}\"]').click();",
-                    f"PrimeFaces.ab({{source:'paginatorNext',process:'@this'}});",  # JSF común
-                ]
-                
-                for script in js_nav_scripts:
-                    try:
-                        driver.execute_script(script)
-                        navigation_success = True
-                        break
-                    except:
-                        continue
-                        
-            except Exception as e:
-                logger.debug(f"Método 3 falló: {e}")
-        
-        # Si ningún método funcionó
-        if not navigation_success:
-            logger.warning(f"⚠️ No se pudo navegar desde página {current_page}")
+                         f"(Páginas consecutivas sin datos: {pages_without_data})")
             
-            # Último intento: buscar cualquier enlace que parezca "siguiente"
-            try:
-                possible_next = driver.find_elements(By.XPATH, 
-                    "//a[contains(text(), '>') or contains(text(), '»') or contains(@title, 'next') or contains(@title, 'siguiente')]")
-                
-                for link in possible_next:
-                    if link.is_displayed():
-                        logger.info("🔄 Usando enlace 'siguiente' genérico")
-                        link.click()
-                        navigation_success = True
-                        break
-            except:
-                pass
+            # Solo parar después de muchas páginas sin datos
+            if pages_without_data >= max_pages_without_data:
+                logger.info(f"🏁 {max_pages_without_data} páginas consecutivas sin datos. Finalizando.")
+                break
         
-        # Si definitivamente no pudimos navegar
+        # Intentar navegar a siguiente página
+        navigation_success = navigate_to_next_page(driver, current_page)
+        
         if not navigation_success:
-            logger.info(f"🏁 No se puede navegar más allá de página {current_page}. Terminando.")
+            logger.warning(f"⚠️ No se pudo navegar más allá de página {current_page}")
             break
         
         current_page += 1
         
         # Esperar que cargue la nueva página
-        time.sleep(3)
+        time.sleep(4)
         
-        # Verificar que efectivamente cambiamos de página
+        # Verificar que efectivamente cambió la página comparando contenido
         try:
-            new_page_data = extract_remates_clean(driver)
-            if page_remates and new_page_data and page_remates == new_page_data:
-                logger.warning("⚠️ Los datos son idénticos a la página anterior")
-                consecutive_failures += 1
+            # Verificar si hay cambios en el contenido
+            new_page_text = driver.find_element(By.TAG_NAME, "body").text
+            if f"página {current_page - 1}" in new_page_text.lower() or f"page {current_page - 1}" in new_page_text.lower():
+                logger.debug(f"Parece que navegamos correctamente a página {current_page}")
         except:
             pass
     
     return all_remates, current_page - 1
 
 def scrape_remaju():
-    """Función principal optimizada para obtener TODOS los remates"""
+    """Función principal para obtener TODOS los remates de REMAJU"""
     driver = None
     url = "https://remaju.pj.gob.pe/remaju/pages/publico/remateExterno.xhtml"
     
     try:
-        logger.info("🚀 Iniciando scraping completo de REMAJU")
+        logger.info("🚀 Iniciando scraping AGRESIVO de REMAJU para obtener TODOS los registros")
         
         driver = setup_driver()
         driver.set_page_load_timeout(30)
         
         logger.info(f"Navegando a: {url}")
         driver.get(url)
-        time.sleep(6)
+        time.sleep(8)  # Esperar más tiempo inicial
         
         page_title = driver.title
         logger.info(f"Título: {page_title}")
         
-        # Scraping completo
-        all_remates, total_pages = scrape_all_pages_improved(driver)
+        # Scraping agresivo
+        all_remates, total_pages = scrape_all_pages_aggressive(driver)
         
         # Estadísticas
         remates_con_precio = len([r for r in all_remates if r.get('precio_numerico', 0) > 0])
         remates_con_descripcion = len([r for r in all_remates if r.get('descripcion', '').strip()])
         
-        # Resultado final limpio
+        # Resultado final
         resultado = {
             "status": "success",
             "timestamp": datetime.now().isoformat(),
             "url": url,
+            "scraping_mode": "aggressive_all_pages",
             "resumen": {
                 "total_remates": len(all_remates),
                 "paginas_procesadas": total_pages,
                 "remates_con_precio": remates_con_precio,
                 "remates_con_descripcion": remates_con_descripcion,
+                "promedio_por_pagina": round(len(all_remates) / total_pages if total_pages > 0 else 0, 1),
                 "completitud_precio_pct": round((remates_con_precio/len(all_remates)*100) if all_remates else 0, 1),
                 "completitud_descripcion_pct": round((remates_con_descripcion/len(all_remates)*100) if all_remates else 0, 1)
             },
@@ -454,15 +468,17 @@ def scrape_remaju():
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(resultado, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"✅ SCRAPING COMPLETADO:")
-        logger.info(f"   📊 Total remates: {len(all_remates)}")
-        logger.info(f"   📄 Páginas: {total_pages}")
-        logger.info(f"   💰 Con precio: {remates_con_precio}")
-        logger.info(f"   📝 Con descripción: {remates_con_descripcion}")
+        logger.info(f"🎯 SCRAPING COMPLETADO CON ÉXITO:")
+        logger.info(f"   📊 TOTAL REMATES: {len(all_remates)}")
+        logger.info(f"   📄 PÁGINAS PROCESADAS: {total_pages}")
+        logger.info(f"   💰 CON PRECIO: {remates_con_precio}")
+        logger.info(f"   📝 CON DESCRIPCIÓN: {remates_con_descripcion}")
+        logger.info(f"   📈 PROMEDIO POR PÁGINA: {round(len(all_remates) / total_pages if total_pages > 0 else 0, 1)}")
         
         # Outputs
         print(f"total_remates={len(all_remates)}")
         print(f"total_pages={total_pages}")
+        print(f"promedio_por_pagina={round(len(all_remates) / total_pages if total_pages > 0 else 0, 1)}")
         print(f"status=success")
         
         return resultado
@@ -490,8 +506,12 @@ def scrape_remaju():
 if __name__ == "__main__":
     result = scrape_remaju()
     print("=" * 60)
-    print(f"RESULTADO: {result.get('status')}")
+    print(f"RESULTADO FINAL: {result.get('status')}")
     if 'resumen' in result:
-        print(f"REMATES: {result['resumen']['total_remates']}")
-        print(f"PÁGINAS: {result['resumen']['paginas_procesadas']}")
-        print(f"CON PRECIO: {result['resumen']['remates_con_precio']}")
+        print(f"🎯 TOTAL REMATES OBTENIDOS: {result['resumen']['total_remates']}")
+        print(f"📄 PÁGINAS PROCESADAS: {result['resumen']['paginas_procesadas']}")
+        print(f"💰 REMATES CON PRECIO: {result['resumen']['remates_con_precio']}")
+        if result['resumen']['total_remates'] < 200:
+            print("⚠️  ADVERTENCIA: Se esperaban ~267 registros")
+        else:
+            print("✅ SCRAPING COMPLETO EXITOSO")
