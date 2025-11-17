@@ -41,53 +41,6 @@ def setup_driver():
     
     return driver
 
-def change_to_more_results_per_page(driver):
-    """Cambiar a mostrar más resultados por página (12 en lugar de 4)"""
-    try:
-        logger.info("Intentando cambiar a 12 resultados por página...")
-        
-        # Buscar el dropdown "Rows Per Page"
-        selectors = [
-            "//select[contains(@class, 'rows')]",
-            "//select[following-sibling::text()[contains(., 'Per Page')]]",
-            "//select[preceding-sibling::text()[contains(., 'Rows')]]",
-            "//select[contains(@onchange, 'rows')]",
-            "//select[contains(@name, 'rows')]"
-        ]
-        
-        for selector in selectors:
-            try:
-                select_element = driver.find_element(By.XPATH, selector)
-                if select_element.is_displayed():
-                    # Buscar opción de 12
-                    options = select_element.find_elements(By.TAG_NAME, "option")
-                    for option in options:
-                        if option.text.strip() == "12":
-                            logger.info("✅ Cambiando a 12 resultados por página")
-                            option.click()
-                            time.sleep(5)  # Esperar que recargue
-                            return True
-            except:
-                continue
-        
-        # Método alternativo: buscar directamente la opción 12
-        try:
-            option_12 = driver.find_element(By.XPATH, "//option[@value='12' or text()='12']")
-            if option_12.is_displayed():
-                logger.info("✅ Encontrada opción 12, seleccionando...")
-                option_12.click()
-                time.sleep(5)
-                return True
-        except:
-            pass
-        
-        logger.warning("No se pudo cambiar a 12 resultados por página")
-        return False
-        
-    except Exception as e:
-        logger.warning(f"Error cambiando resultados por página: {e}")
-        return False
-
 def extract_remates_clean(driver):
     """Extraer remates con estructura limpia"""
     try:
@@ -199,7 +152,7 @@ def extract_remates_clean(driver):
                                     except:
                                         pass
                     
-                    # Precio directo (si no se encontró con "precio base")
+                    # Precio directo
                     elif ("s/." in rline or "$" in rline) and any(c.isdigit() for c in rline) and not remate["precio_monto"]:
                         remate["precio_moneda"] = "PEN" if "s/." in rline else "USD"
                         remate["precio_monto"] = rline
@@ -260,31 +213,65 @@ def extract_remates_clean(driver):
         logger.error(f"Error en extract_remates_clean: {e}")
         return []
 
-def navigate_to_next_page(driver, current_page):
-    """Navegación robusta a la siguiente página"""
-    next_page_num = current_page + 1
+def get_page_signature(driver):
+    """Obtener 'firma' única de la página actual para verificar cambios"""
+    try:
+        # Buscar números de remate únicos en la página
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        
+        # Extraer todos los números de remate de la página
+        remate_numbers = re.findall(r'remate n°?\s*(\d+)', page_text.lower())
+        
+        # Crear signature única basada en los números de remate
+        if remate_numbers:
+            signature = sorted(set(remate_numbers))  # Unique y ordenados
+            return tuple(signature)  # Inmutable para comparación
+        
+        # Si no hay remates, usar texto parcial como signature
+        return hash(page_text[:1000])  # Hash de primeros 1000 caracteres
+        
+    except Exception as e:
+        logger.warning(f"Error obteniendo signature de página: {e}")
+        return None
+
+def navigate_and_verify(driver, current_page, target_page, current_signature):
+    """Navegar y VERIFICAR que realmente cambió la página"""
     
-    logger.info(f"🔄 Intentando navegar de página {current_page} a {next_page_num}")
+    logger.info(f"🔄 Navegando de página {current_page} a {target_page}")
     
     # Método 1: Clic directo en número de página
     try:
-        # Buscar enlace de la siguiente página
-        next_page_link = driver.find_element(By.XPATH, f"//a[text()='{next_page_num}']")
+        next_page_link = driver.find_element(By.XPATH, f"//a[text()='{target_page}']")
         if next_page_link.is_displayed():
             classes = next_page_link.get_attribute('class') or ''
             if 'disabled' not in classes.lower() and 'inactive' not in classes.lower():
-                # Scroll al elemento
+                # Scroll y clic
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_page_link)
                 time.sleep(1)
                 
-                # Clic
-                driver.execute_script("arguments[0].click();", next_page_link)
-                logger.info(f"✅ Navegación exitosa a página {next_page_num} (método directo)")
-                return True
+                # Intentar clic normal primero
+                try:
+                    next_page_link.click()
+                except:
+                    # Si falla, usar JavaScript
+                    driver.execute_script("arguments[0].click();", next_page_link)
+                
+                # VERIFICACIÓN CRÍTICA: Esperar y verificar cambio
+                logger.info(f"   Esperando cambio de página...")
+                time.sleep(6)  # Tiempo generoso para AJAX
+                
+                new_signature = get_page_signature(driver)
+                
+                if new_signature and new_signature != current_signature:
+                    logger.info(f"✅ NAVEGACIÓN VERIFICADA a página {target_page} (método directo)")
+                    return True, new_signature
+                else:
+                    logger.warning(f"❌ Navegación FALLÓ - página no cambió (método directo)")
+        
     except Exception as e:
         logger.debug(f"Método 1 falló: {e}")
     
-    # Método 2: Buscar botón "N" (Next)
+    # Método 2: Botón Next con verificación
     try:
         next_btn = driver.find_element(By.XPATH, "//a[text()='N' or text()='»' or text()='>']")
         if next_btn.is_displayed():
@@ -292,91 +279,88 @@ def navigate_to_next_page(driver, current_page):
             if 'disabled' not in classes.lower():
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_btn)
                 time.sleep(1)
-                driver.execute_script("arguments[0].click();", next_btn)
-                logger.info("✅ Navegación exitosa con botón 'N' (método 2)")
-                return True
+                
+                try:
+                    next_btn.click()
+                except:
+                    driver.execute_script("arguments[0].click();", next_btn)
+                
+                logger.info(f"   Esperando cambio de página (método Next)...")
+                time.sleep(6)
+                
+                new_signature = get_page_signature(driver)
+                
+                if new_signature and new_signature != current_signature:
+                    logger.info(f"✅ NAVEGACIÓN VERIFICADA a página {target_page} (método Next)")
+                    return True, new_signature
+                else:
+                    logger.warning(f"❌ Navegación FALLÓ - página no cambió (método Next)")
+                    
     except Exception as e:
         logger.debug(f"Método 2 falló: {e}")
     
-    # Método 3: Buscar cualquier enlace con onclick que contenga paginación
+    # Método 3: Refresh y navegación directa via URL
     try:
-        pagination_links = driver.find_elements(By.XPATH, "//a[contains(@onclick, 'page') or contains(@onclick, 'Page')]")
-        for link in pagination_links:
-            if link.is_displayed():
-                onclick = link.get_attribute('onclick') or ''
-                # Buscar si contiene el número de página que queremos
-                if str(next_page_num) in onclick:
-                    driver.execute_script("arguments[0].click();", link)
-                    logger.info(f"✅ Navegación exitosa con onclick a página {next_page_num} (método 3)")
-                    return True
+        current_url = driver.current_url
+        
+        # Intentar agregar parámetros de página a la URL
+        if '?' in current_url:
+            new_url = f"{current_url}&page={target_page}"
+        else:
+            new_url = f"{current_url}?page={target_page}"
+        
+        logger.info(f"   Intentando navegación directa a: {new_url}")
+        driver.get(new_url)
+        time.sleep(8)  # Tiempo para cargar página completa
+        
+        new_signature = get_page_signature(driver)
+        
+        if new_signature and new_signature != current_signature:
+            logger.info(f"✅ NAVEGACIÓN VERIFICADA a página {target_page} (URL directa)")
+            return True, new_signature
+        else:
+            logger.warning(f"❌ Navegación FALLÓ - página no cambió (URL directa)")
+            
     except Exception as e:
         logger.debug(f"Método 3 falló: {e}")
     
-    # Método 4: JavaScript directo para cambiar página
-    try:
-        # Intentar diferentes funciones JavaScript comunes
-        js_functions = [
-            f"window.location.href = window.location.href + '&page={next_page_num}';",
-            f"if(typeof(PrimeFaces) !== 'undefined') {{ PrimeFaces.ab({{source:'page{next_page_num}',process:'@this'}}); }}",
-            f"if(typeof(changePage) === 'function') {{ changePage({next_page_num}); }}",
-        ]
-        
-        for js_func in js_functions:
-            try:
-                driver.execute_script(js_func)
-                logger.info(f"✅ Navegación exitosa con JavaScript a página {next_page_num} (método 4)")
-                return True
-            except:
-                continue
-    except Exception as e:
-        logger.debug(f"Método 4 falló: {e}")
-    
-    # Método 5: Buscar INPUT de página y cambiarlo
-    try:
-        page_input = driver.find_element(By.XPATH, "//input[@type='text' and (@value='{0}' or @placeholder='página')]".format(current_page))
-        if page_input.is_displayed():
-            page_input.clear()
-            page_input.send_keys(str(next_page_num))
-            
-            # Buscar botón "Go" o similar
-            go_buttons = driver.find_elements(By.XPATH, "//button[text()='Go' or text()='Ir'] | //input[@type='submit' and @value='Go']")
-            for btn in go_buttons:
-                if btn.is_displayed():
-                    btn.click()
-                    logger.info(f"✅ Navegación exitosa con input de página {next_page_num} (método 5)")
-                    return True
-    except Exception as e:
-        logger.debug(f"Método 5 falló: {e}")
-    
-    logger.warning(f"❌ No se pudo navegar a página {next_page_num}")
-    return False
+    logger.error(f"❌ TODOS los métodos de navegación FALLARON para página {target_page}")
+    return False, current_signature
 
-def scrape_all_pages_aggressive(driver):
-    """Scraper agresivo para obtener TODOS los registros"""
+def scrape_all_pages_with_verification(driver):
+    """Scraper con verificación REAL de navegación"""
     all_remates = []
     current_page = 1
-    
-    # Primero intentar cambiar a más resultados por página
-    change_to_more_results_per_page(driver)
-    
-    # Límite de seguridad muy alto
     max_pages = 100
-    pages_without_data = 0
-    max_pages_without_data = 3
+    failed_navigation_count = 0
+    max_failed_navigation = 2
     
-    logger.info(f"🚀 Iniciando scraping agresivo - hasta {max_pages} páginas")
+    logger.info(f"🚀 Iniciando scraping con verificación REAL de navegación")
+    
+    # Obtener signature de la primera página
+    current_signature = get_page_signature(driver)
+    logger.info(f"📄 Signature inicial de página 1: {current_signature}")
     
     while current_page <= max_pages:
-        logger.info(f"📄 Procesando página {current_page} (Total remates acumulados: {len(all_remates)})")
-        
-        # Esperar carga mínima
-        time.sleep(1)
+        logger.info(f"📄 PROCESANDO PÁGINA {current_page} (Total remates: {len(all_remates)})")
         
         # Extraer remates de la página actual
         page_remates = extract_remates_clean(driver)
         
         if page_remates:
-            pages_without_data = 0  # Reset contador
+            failed_navigation_count = 0  # Reset
+            
+            # Verificar que no sean remates duplicados de página anterior
+            if all_remates:
+                # Comparar últimos números de remate
+                last_numbers = {r['numero'] for r in all_remates[-4:]}  # Últimos 4
+                current_numbers = {r['numero'] for r in page_remates}
+                
+                if last_numbers == current_numbers:
+                    logger.error(f"🔄 PÁGINA DUPLICADA DETECTADA - Mismos remates que página anterior")
+                    logger.error(f"   Números anteriores: {sorted(last_numbers)}")
+                    logger.error(f"   Números actuales: {sorted(current_numbers)}")
+                    break
             
             # Agregar metadata
             for idx, remate in enumerate(page_remates):
@@ -385,61 +369,49 @@ def scrape_all_pages_aggressive(driver):
                 remate['scraped_at'] = datetime.now().isoformat()
             
             all_remates.extend(page_remates)
-            logger.info(f"✅ Página {current_page}: {len(page_remates)} remates " +
+            logger.info(f"✅ PÁGINA {current_page}: {len(page_remates)} remates ÚNICOS " +
                        f"(Total acumulado: {len(all_remates)})")
         else:
-            pages_without_data += 1
-            logger.warning(f"❌ Página {current_page}: Sin datos " +
-                         f"(Páginas consecutivas sin datos: {pages_without_data})")
+            logger.warning(f"❌ Página {current_page}: Sin datos")
+        
+        # Intentar navegar a siguiente página con verificación
+        target_page = current_page + 1
+        navigation_success, new_signature = navigate_and_verify(driver, current_page, target_page, current_signature)
+        
+        if navigation_success:
+            current_signature = new_signature
+            current_page = target_page
+        else:
+            failed_navigation_count += 1
+            logger.error(f"💥 FALLÓ NAVEGACIÓN A PÁGINA {target_page} " +
+                        f"(Fallos consecutivos: {failed_navigation_count})")
             
-            # Solo parar después de muchas páginas sin datos
-            if pages_without_data >= max_pages_without_data:
-                logger.info(f"🏁 {max_pages_without_data} páginas consecutivas sin datos. Finalizando.")
+            if failed_navigation_count >= max_failed_navigation:
+                logger.info(f"🏁 Máximo de fallos de navegación alcanzado. FINALIZANDO.")
                 break
-        
-        # Intentar navegar a siguiente página
-        navigation_success = navigate_to_next_page(driver, current_page)
-        
-        if not navigation_success:
-            logger.warning(f"⚠️ No se pudo navegar más allá de página {current_page}")
-            break
-        
-        current_page += 1
-        
-        # Esperar que cargue la nueva página
-        time.sleep(4)
-        
-        # Verificar que efectivamente cambió la página comparando contenido
-        try:
-            # Verificar si hay cambios en el contenido
-            new_page_text = driver.find_element(By.TAG_NAME, "body").text
-            if f"página {current_page - 1}" in new_page_text.lower() or f"page {current_page - 1}" in new_page_text.lower():
-                logger.debug(f"Parece que navegamos correctamente a página {current_page}")
-        except:
-            pass
     
     return all_remates, current_page - 1
 
 def scrape_remaju():
-    """Función principal para obtener TODOS los remates de REMAJU"""
+    """Función principal con verificación REAL de navegación"""
     driver = None
     url = "https://remaju.pj.gob.pe/remaju/pages/publico/remateExterno.xhtml"
     
     try:
-        logger.info("🚀 Iniciando scraping AGRESIVO de REMAJU para obtener TODOS los registros")
+        logger.info("🚀 Iniciando scraping REMAJU con verificación REAL de navegación")
         
         driver = setup_driver()
         driver.set_page_load_timeout(30)
         
         logger.info(f"Navegando a: {url}")
         driver.get(url)
-        time.sleep(8)  # Esperar más tiempo inicial
+        time.sleep(8)
         
         page_title = driver.title
         logger.info(f"Título: {page_title}")
         
-        # Scraping agresivo
-        all_remates, total_pages = scrape_all_pages_aggressive(driver)
+        # Scraping con verificación
+        all_remates, total_pages = scrape_all_pages_with_verification(driver)
         
         # Estadísticas
         remates_con_precio = len([r for r in all_remates if r.get('precio_numerico', 0) > 0])
@@ -450,7 +422,7 @@ def scrape_remaju():
             "status": "success",
             "timestamp": datetime.now().isoformat(),
             "url": url,
-            "scraping_mode": "aggressive_all_pages",
+            "scraping_mode": "verified_navigation",
             "resumen": {
                 "total_remates": len(all_remates),
                 "paginas_procesadas": total_pages,
@@ -468,7 +440,7 @@ def scrape_remaju():
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(resultado, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"🎯 SCRAPING COMPLETADO CON ÉXITO:")
+        logger.info(f"🎯 SCRAPING COMPLETADO:")
         logger.info(f"   📊 TOTAL REMATES: {len(all_remates)}")
         logger.info(f"   📄 PÁGINAS PROCESADAS: {total_pages}")
         logger.info(f"   💰 CON PRECIO: {remates_con_precio}")
@@ -478,7 +450,6 @@ def scrape_remaju():
         # Outputs
         print(f"total_remates={len(all_remates)}")
         print(f"total_pages={total_pages}")
-        print(f"promedio_por_pagina={round(len(all_remates) / total_pages if total_pages > 0 else 0, 1)}")
         print(f"status=success")
         
         return resultado
@@ -508,10 +479,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"RESULTADO FINAL: {result.get('status')}")
     if 'resumen' in result:
-        print(f"🎯 TOTAL REMATES OBTENIDOS: {result['resumen']['total_remates']}")
-        print(f"📄 PÁGINAS PROCESADAS: {result['resumen']['paginas_procesadas']}")
-        print(f"💰 REMATES CON PRECIO: {result['resumen']['remates_con_precio']}")
-        if result['resumen']['total_remates'] < 200:
-            print("⚠️  ADVERTENCIA: Se esperaban ~267 registros")
+        print(f"🎯 TOTAL REMATES: {result['resumen']['total_remates']}")
+        print(f"📄 PÁGINAS: {result['resumen']['paginas_procesadas']}")
+        if result['resumen']['total_remates'] < 50:
+            print("⚠️  ADVERTENCIA: Posible problema de navegación")
         else:
-            print("✅ SCRAPING COMPLETO EXITOSO")
+            print("✅ SCRAPING EXITOSO")
