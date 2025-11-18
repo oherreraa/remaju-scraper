@@ -44,40 +44,20 @@ def setup_driver():
 def extract_remate_tab_info(driver):
     """Extraer información de la pestaña REMATE"""
     remate_data = {
-        # Información del expediente
-        "expediente": "",
-        "distrito_judicial": "",
-        "organo_jurisdiccional": "",
-        "instancia": "",
-        "juez": "",
-        "especialista": "",
-        "materia": "",
-        "resolucion": "",
-        "fecha_resolucion": "",
-        "archivo_resolucion": "",
-        
-        # Información del remate
-        "convocatoria": "",
-        "tipo_cambio": "",
-        "tasacion": "",
-        "precio_base": "",
-        "precio_base_numerico": 0,
-        "precio_base_moneda": "",
-        "incremento_ofertas": "",
-        "arancel": "",
-        "oblaje": "",
-        "descripcion_completa": "",
-        "num_inscritos": ""
+        "expediente": "", "distrito_judicial": "", "organo_jurisdiccional": "",
+        "instancia": "", "juez": "", "especialista": "", "materia": "",
+        "resolucion": "", "fecha_resolucion": "", "archivo_resolucion": "",
+        "convocatoria": "", "tipo_cambio": "", "tasacion": "",
+        "precio_base": "", "precio_base_numerico": 0, "precio_base_moneda": "",
+        "incremento_ofertas": "", "arancel": "", "oblaje": "",
+        "descripcion_completa": "", "num_inscritos": ""
     }
     
     try:
         page_text = driver.find_element(By.TAG_NAME, "body").text
         lines = [line.strip() for line in page_text.split('\n') if line.strip()]
         
-        # Procesar líneas buscando patrones específicos
         for i, line in enumerate(lines):
-            
-            # Información del expediente
             if line == "Expediente" and i + 1 < len(lines):
                 remate_data["expediente"] = lines[i + 1]
             elif line == "Distrito Judicial" and i + 1 < len(lines):
@@ -98,8 +78,6 @@ def extract_remate_tab_info(driver):
                 remate_data["fecha_resolucion"] = lines[i + 1]
             elif line == "Archivo" and i + 1 < len(lines):
                 remate_data["archivo_resolucion"] = lines[i + 1]
-            
-            # Información del remate
             elif line == "Convocatoria" and i + 1 < len(lines):
                 remate_data["convocatoria"] = lines[i + 1]
             elif line == "Tipo Cambio" and i + 1 < len(lines):
@@ -110,7 +88,6 @@ def extract_remate_tab_info(driver):
                 precio_base = lines[i + 1]
                 remate_data["precio_base"] = precio_base
                 
-                # Extraer valor numérico y moneda
                 if "$" in precio_base:
                     remate_data["precio_base_moneda"] = "USD"
                     numbers = re.findall(r'[\d,]+\.?\d*', precio_base.replace(',', ''))
@@ -127,7 +104,6 @@ def extract_remate_tab_info(driver):
                             remate_data["precio_base_numerico"] = float(numbers[0])
                         except:
                             pass
-            
             elif line == "Incremento entre ofertas" and i + 1 < len(lines):
                 remate_data["incremento_ofertas"] = lines[i + 1]
             elif line == "Arancel" and i + 1 < len(lines):
@@ -149,32 +125,25 @@ def extract_remate_tab_info(driver):
 def extract_inmuebles_tab_info(driver):
     """Extraer información de la pestaña INMUEBLES"""
     inmuebles_data = {
-        "inmueble_distrito_judicial": "",
-        "inmueble_departamento": "",
-        "inmueble_provincia": "",
-        "inmueble_distrito": "",
-        "inmueble_partida_registral": "",
-        "inmueble_tipo": "",
-        "inmueble_direccion": "",
-        "inmueble_cargas_gravamenes": "",
-        "inmueble_porcentaje_rematar": "",
-        "inmueble_imagenes": ""
+        "inmueble_distrito_judicial": "", "inmueble_departamento": "",
+        "inmueble_provincia": "", "inmueble_distrito": "",
+        "inmueble_partida_registral": "", "inmueble_tipo": "",
+        "inmueble_direccion": "", "inmueble_cargas_gravamenes": "",
+        "inmueble_porcentaje_rematar": "", "inmueble_imagenes": ""
     }
     
     try:
-        # Intentar hacer clic en la pestaña Inmuebles
         try:
             inmuebles_tab = driver.find_element(By.XPATH, "//a[contains(text(), 'Inmuebles') or contains(@href, 'inmuebles') or contains(@onclick, 'inmuebles')]")
             driver.execute_script("arguments[0].click();", inmuebles_tab)
             time.sleep(3)
             logger.info("✅ Navegó a pestaña Inmuebles")
         except:
-            logger.warning("⚠️ No se pudo hacer clic en pestaña Inmuebles, extrayendo de página actual")
+            logger.warning("⚠️ No se pudo hacer clic en pestaña Inmuebles")
         
         page_text = driver.find_element(By.TAG_NAME, "body").text
         lines = [line.strip() for line in page_text.split('\n') if line.strip()]
         
-        # Buscar información específica de inmuebles
         for i, line in enumerate(lines):
             if line == "Distrito Judicial" and i + 1 < len(lines):
                 inmuebles_data["inmueble_distrito_judicial"] = lines[i + 1]
@@ -185,39 +154,17 @@ def extract_inmuebles_tab_info(driver):
             elif line == "Distrito" and i + 1 < len(lines):
                 inmuebles_data["inmueble_distrito"] = lines[i + 1]
         
-        # Buscar información de tabla de inmuebles
-        try:
-            table_text = driver.find_element(By.TAG_NAME, "body").text
-            
-            # Extraer partida registral
-            partida_match = re.search(r'(P?\d{8,})', table_text)
-            if partida_match:
-                inmuebles_data["inmueble_partida_registral"] = partida_match.group(1)
-            
-            # Extraer tipo de inmueble
-            tipos_inmuebles = ['CASA', 'DEPARTAMENTO', 'TERRENO', 'LOCAL', 'OFICINA', 'EDIFICIO']
-            for tipo in tipos_inmuebles:
-                if tipo in table_text.upper():
-                    inmuebles_data["inmueble_tipo"] = tipo
-                    break
-            
-            # Extraer dirección (buscar línea larga con ubicación)
-            direccion_matches = re.findall(r'[A-Z][A-Z\s\.,]+MZ[^\.]+\.', table_text)
-            if direccion_matches:
-                inmuebles_data["inmueble_direccion"] = direccion_matches[0].strip()
-            
-            # Extraer cargas y gravámenes
-            cargas_section = re.search(r'HIPOTECA.*?ESCRITURA[^\.]*\.', table_text, re.DOTALL)
-            if cargas_section:
-                inmuebles_data["inmueble_cargas_gravamenes"] = cargas_section.group(0)
-            
-            # Extraer porcentaje a rematar
-            porcentaje_match = re.search(r'(\d+\s*%)', table_text)
-            if porcentaje_match:
-                inmuebles_data["inmueble_porcentaje_rematar"] = porcentaje_match.group(1)
-            
-        except Exception as e:
-            logger.debug(f"Error extrayendo tabla de inmuebles: {e}")
+        table_text = driver.find_element(By.TAG_NAME, "body").text
+        
+        partida_match = re.search(r'(P?\d{8,})', table_text)
+        if partida_match:
+            inmuebles_data["inmueble_partida_registral"] = partida_match.group(1)
+        
+        tipos_inmuebles = ['CASA', 'DEPARTAMENTO', 'TERRENO', 'LOCAL', 'OFICINA', 'EDIFICIO']
+        for tipo in tipos_inmuebles:
+            if tipo in table_text.upper():
+                inmuebles_data["inmueble_tipo"] = tipo
+                break
         
         logger.info(f"✅ Pestaña INMUEBLES: {inmuebles_data['inmueble_tipo']} en {inmuebles_data['inmueble_distrito']}")
         
@@ -234,56 +181,40 @@ def extract_cronograma_tab_info(driver):
     }
     
     try:
-        # Intentar hacer clic en la pestaña Cronograma
         try:
             cronograma_tab = driver.find_element(By.XPATH, "//a[contains(text(), 'Cronograma') or contains(@href, 'cronograma') or contains(@onclick, 'cronograma')]")
             driver.execute_script("arguments[0].click();", cronograma_tab)
             time.sleep(3)
             logger.info("✅ Navegó a pestaña Cronograma")
         except:
-            logger.warning("⚠️ No se pudo hacer clic en pestaña Cronograma, extrayendo de página actual")
+            logger.warning("⚠️ No se pudo hacer clic en pestaña Cronograma")
         
         page_text = driver.find_element(By.TAG_NAME, "body").text
         cronograma_data["cronograma_texto_completo"] = page_text
         
         lines = [line.strip() for line in page_text.split('\n') if line.strip()]
-        
-        # Extraer fases del cronograma
         fases = []
         
         for line in lines:
-            # Buscar líneas que empiecen con número (fases)
             if re.match(r'^\d+[A-Za-z]', line):
-                fase = {
-                    "linea_completa": line
-                }
+                fase = {"linea_completa": line}
                 
-                # Extraer número de fase
                 numero_match = re.match(r'^(\d+)', line)
                 if numero_match:
                     fase["numero"] = numero_match.group(1)
                 
-                # Extraer nombre de fase
                 partes = line.split()
                 if len(partes) > 1:
                     fase["fase_nombre"] = partes[1]
                 
-                # Extraer fechas (formato dd/mm/yyyy)
                 fechas = re.findall(r'\d{2}/\d{2}/\d{4}', line)
                 if len(fechas) >= 2:
                     fase["fecha_inicio"] = fechas[0]
                     fase["fecha_fin"] = fechas[1]
                 
-                # Extraer horas
-                horas = re.findall(r'\d{2}:\d{2}:\d{2}\s*[AP]M', line)
-                if len(horas) >= 2:
-                    fase["hora_inicio"] = horas[0]
-                    fase["hora_fin"] = horas[1]
-                
                 fases.append(fase)
         
         cronograma_data["cronograma_fases"] = fases
-        
         logger.info(f"✅ Pestaña CRONOGRAMA: {len(fases)} fases extraídas")
         
     except Exception as e:
@@ -292,27 +223,20 @@ def extract_cronograma_tab_info(driver):
     return cronograma_data
 
 def extract_detail_page_info(driver):
-    """Extraer toda la información de la página de detalle con las 3 pestañas"""
+    """Extraer toda la información de la página de detalle"""
     detail_data = {}
     
     try:
-        # Esperar a que cargue completamente
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         
         logger.info("📋 Extrayendo información de pestaña REMATE")
-        
-        # PESTAÑA 1: REMATE (información principal)
         remate_info = extract_remate_tab_info(driver)
         detail_data.update(remate_info)
         
-        # PESTAÑA 2: INMUEBLES
         logger.info("🏠 Navegando a pestaña INMUEBLES")
         inmuebles_info = extract_inmuebles_tab_info(driver)
         detail_data.update(inmuebles_info)
         
-        # PESTAÑA 3: CRONOGRAMA
         logger.info("📅 Navegando a pestaña CRONOGRAMA")
         cronograma_info = extract_cronograma_tab_info(driver)
         detail_data.update(cronograma_info)
@@ -325,18 +249,14 @@ def extract_detail_page_info(driver):
         return detail_data
 
 def extract_basic_remate_info_only(driver):
-    """Extraer solo información básica de remates SIN navegar a detalles"""
+    """Extraer solo información básica de remates"""
     try:
         page_text = driver.find_element(By.TAG_NAME, "body").text
         lines = [line.strip() for line in page_text.split('\n') if line.strip()]
-        
         remates_info = []
         
-        # Buscar patrones de remates
         for i, line in enumerate(lines):
             if "remate n°" in line.lower() and "convocatoria" in line.lower():
-                
-                # Extraer información básica
                 numero_match = re.search(r'remate n°?\s*(\d+)', line.lower())
                 if numero_match:
                     remate_numero = numero_match.group(1)
@@ -360,32 +280,20 @@ def extract_basic_remate_info_only(driver):
         logger.error(f"Error en extract_basic_remate_info_only: {e}")
         return []
 
-def find_and_click_detail_by_position_improved(driver, remate_info):
-    """Estrategia mejorada para encontrar botón detalle"""
+def find_and_click_detail_button_simple(driver, remate_numero):
+    """Versión simplificada para encontrar y hacer clic en botón detalle"""
     try:
-        remate_numero = remate_info['numero']
         logger.info(f"🎯 Buscando detalle para remate {remate_numero}")
         
-        # Esperar un poco para asegurar que la página esté completamente cargada
+        # Esperar a que botones estén disponibles
         time.sleep(2)
         
-        # Obtener todos los botones de detalle con espera explícita
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//a[contains(text(), 'Detalle')]"))
-            )
-        except:
-            logger.warning("⚠️ No se pudieron encontrar botones Detalle con espera explícita")
-        
-        # Múltiples estrategias para encontrar botones
+        # Buscar todos los botones de detalle
         detail_buttons = []
-        
         button_selectors = [
             "//a[contains(text(), 'Detalle')]",
             "//input[@value='Detalle']", 
-            "//button[contains(text(), 'Detalle')]",
-            "//span[contains(text(), 'Detalle')]/parent::*",
-            "//*[@onclick and contains(@onclick, 'detalle')]"
+            "//button[contains(text(), 'Detalle')]"
         ]
         
         for selector in button_selectors:
@@ -395,59 +303,19 @@ def find_and_click_detail_by_position_improved(driver, remate_info):
             except:
                 continue
         
-        # Remover duplicados
-        detail_buttons = list(set(detail_buttons))
-        logger.info(f"🔍 Total botones Detalle únicos encontrados: {len(detail_buttons)}")
+        logger.info(f"🔍 Botones Detalle encontrados: {len(detail_buttons)}")
         
         if not detail_buttons:
-            logger.error(f"❌ No se encontraron botones Detalle para remate {remate_numero}")
             return False
         
-        # Estrategia 1: Por cercanía al número del remate
-        try:
-            for button in detail_buttons:
-                try:
-                    # Buscar el contexto del botón
-                    parent_container = button.find_element(By.XPATH, "./ancestor::*[contains(text(), '{}')][1]".format(remate_numero))
-                    
-                    if parent_container:
-                        logger.info(f"✅ Botón detalle encontrado por cercanía para remate {remate_numero}")
-                        
-                        # Hacer scroll y clic
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-                        time.sleep(2)
-                        
-                        try:
-                            button.click()
-                        except:
-                            driver.execute_script("arguments[0].click();", button)
-                        
-                        time.sleep(5)
-                        
-                        # Verificar navegación
-                        current_url = driver.current_url
-                        if current_url != "https://remaju.pj.gob.pe/remaju/pages/publico/remateExterno.xhtml":
-                            logger.info(f"✅ Navegación exitosa por cercanía")
-                            return True
-                
-                except Exception as e:
-                    continue
-        
-        except Exception as e:
-            logger.debug(f"Estrategia cercanía falló: {e}")
-        
-        # Estrategia 2: Probar botones secuencialmente
-        logger.info(f"🔄 Probando todos los botones secuencialmente...")
-        
+        # Probar cada botón hasta que uno funcione
         for idx, button in enumerate(detail_buttons):
             try:
                 if button.is_displayed() and button.is_enabled():
-                    logger.info(f"   Probando botón {idx + 1}/{len(detail_buttons)}")
+                    logger.info(f"   Probando botón {idx + 1}")
                     
-                    # Guardar URL actual
                     original_url = driver.current_url
                     
-                    # Hacer scroll y clic
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
                     time.sleep(1)
                     
@@ -458,19 +326,16 @@ def find_and_click_detail_by_position_improved(driver, remate_info):
                     
                     time.sleep(4)
                     
-                    # Verificar si navegó
                     new_url = driver.current_url
                     if new_url != original_url:
-                        # Verificar que es página de detalle
                         page_text = driver.find_element(By.TAG_NAME, "body").text
                         if "expediente" in page_text.lower() or "tasación" in page_text.lower():
                             logger.info(f"✅ NAVEGACIÓN EXITOSA con botón {idx + 1}")
                             return True
                         else:
-                            logger.warning(f"⚠️ Navegó pero no es página de detalle, regresando...")
                             driver.back()
                             time.sleep(3)
-                
+                            
             except Exception as e:
                 logger.debug(f"Error con botón {idx + 1}: {e}")
                 continue
@@ -479,15 +344,226 @@ def find_and_click_detail_by_position_improved(driver, remate_info):
         return False
         
     except Exception as e:
-        logger.error(f"Error en find_and_click_detail_by_position_improved: {e}")
+        logger.error(f"Error en find_and_click_detail_button_simple: {e}")
         return False
 
-def navigate_to_next_page_improved(driver, target_page):
-    """Navegación mejorada a siguiente página"""
+def navigate_to_next_page(driver, target_page):
+    """Navegación a siguiente página"""
     try:
         logger.info(f"🔄 Navegando a página {target_page}")
+        time.sleep(2)  # Timer de 2 segundos como solicitado
         
-        # Esperar a que la página esté lista
-        time.sleep(2)
+        # Buscar enlace de página específica
+        try:
+            page_link = driver.find_element(By.XPATH, f"//a[text()='{target_page}']")
+            if page_link.is_displayed():
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", page_link)
+                time.sleep(1)
+                
+                try:
+                    page_link.click()
+                except:
+                    driver.execute_script("arguments[0].click();", page_link)
+                
+                time.sleep(3)
+                return True
+                
+        except Exception as e:
+            logger.debug(f"No se encontró enlace a página {target_page}: {e}")
         
-        # Estrategia 1: Buscar enl
+        # Buscar botón "Siguiente"
+        try:
+            next_selectors = [
+                "//a[text()='»' or text()='>' or text()='Next' or text()='Siguiente']",
+                "//input[@value='»' or @value='>' or @value='Next']",
+                "//button[text()='»' or text()='>' or text()='Next']"
+            ]
+            
+            for selector in next_selectors:
+                try:
+                    next_button = driver.find_element(By.XPATH, selector)
+                    if next_button.is_displayed() and next_button.is_enabled():
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+                        time.sleep(1)
+                        
+                        try:
+                            next_button.click()
+                        except:
+                            driver.execute_script("arguments[0].click();", next_button)
+                        
+                        time.sleep(3)
+                        return True
+                        
+                except:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"Error con botón siguiente: {e}")
+        
+        logger.error(f"❌ No se pudo navegar a página {target_page}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error en navigate_to_next_page: {e}")
+        return False
+
+def scrape_all_pages_with_details():
+    """Función principal para scraper todas las páginas con detalles"""
+    driver = None
+    url = "https://remaju.pj.gob.pe/remaju/pages/publico/remateExterno.xhtml"
+    
+    try:
+        logger.info("🚀 Iniciando scraping REMAJU - TODAS LAS PÁGINAS CON DETALLES")
+        
+        driver = setup_driver()
+        driver.set_page_load_timeout(30)
+        
+        logger.info(f"Navegando a: {url}")
+        driver.get(url)
+        time.sleep(8)
+        
+        all_remates = []
+        current_page = 1
+        max_pages = 100
+        failed_pages = 0
+        max_failed = 3
+        
+        while current_page <= max_pages and failed_pages < max_failed:
+            logger.info(f"\n📄 PROCESANDO PÁGINA {current_page} (Total remates: {len(all_remates)})")
+            
+            try:
+                # Extraer remates básicos de la página actual
+                remates_info = extract_basic_remate_info_only(driver)
+                
+                if remates_info:
+                    failed_pages = 0  # Reset contador
+                    
+                    # Procesar cada remate
+                    for i, remate_info in enumerate(remates_info):
+                        remate_numero = remate_info['numero']
+                        logger.info(f"  📋 REMATE {i+1}/{len(remates_info)} - Número {remate_numero}")
+                        
+                        try:
+                            # Intentar extraer detalles
+                            if find_and_click_detail_button_simple(driver, remate_numero):
+                                logger.info(f"  ✅ Navegación exitosa a detalle")
+                                
+                                # Extraer información detallada
+                                detailed_info = extract_detail_page_info(driver)
+                                
+                                # Combinar información
+                                complete_remate = {
+                                    **remate_info,
+                                    **detailed_info,
+                                    "procesado_detalle": True,
+                                    "pagina": current_page,
+                                    "index_global": len(all_remates) + 1,
+                                    "timestamp_detalle": datetime.now().isoformat()
+                                }
+                                
+                                all_remates.append(complete_remate)
+                                logger.info(f"  ✅ Remate {remate_numero} procesado completamente")
+                                
+                                # Regresar a página principal
+                                driver.back()
+                                time.sleep(3)
+                                
+                            else:
+                                # Agregar remate básico sin detalles
+                                remate_info.update({
+                                    "procesado_detalle": False,
+                                    "error_detalle": "No se pudo acceder a detalle",
+                                    "pagina": current_page,
+                                    "index_global": len(all_remates) + 1
+                                })
+                                all_remates.append(remate_info)
+                                logger.warning(f"  ⚠️ Remate {remate_numero} sin detalles")
+                            
+                            time.sleep(1)  # Pausa entre remates
+                            
+                        except Exception as e:
+                            logger.error(f"  ❌ Error procesando remate {remate_numero}: {e}")
+                            remate_info.update({
+                                "procesado_detalle": False,
+                                "error_detalle": str(e),
+                                "pagina": current_page,
+                                "index_global": len(all_remates) + 1
+                            })
+                            all_remates.append(remate_info)
+                    
+                    logger.info(f"✅ PÁGINA {current_page}: {len(remates_info)} remates procesados")
+                    
+                else:
+                    logger.warning(f"⚠️ Página {current_page}: Sin remates encontrados")
+                    failed_pages += 1
+                
+                # Navegar a siguiente página
+                if navigate_to_next_page(driver, current_page + 1):
+                    current_page += 1
+                else:
+                    logger.error(f"❌ No se pudo navegar a página {current_page + 1}")
+                    failed_pages += 1
+                    break
+                    
+            except Exception as e:
+                logger.error(f"❌ Error en página {current_page}: {e}")
+                failed_pages += 1
+                break
+        
+        # Estadísticas finales
+        remates_con_detalle = len([r for r in all_remates if r.get('procesado_detalle', False)])
+        remates_con_precio = len([r for r in all_remates if r.get('precio_base_numerico', 0) > 0])
+        
+        resultado = {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "url": url,
+            "scraping_mode": "complete_all_pages_with_details",
+            "resumen": {
+                "total_remates": len(all_remates),
+                "remates_con_detalle": remates_con_detalle,
+                "remates_con_precio": remates_con_precio,
+                "paginas_procesadas": current_page - 1,
+                "completitud_detalle_pct": round((remates_con_detalle/len(all_remates)*100) if all_remates else 0, 1),
+                "completitud_precio_pct": round((remates_con_precio/len(all_remates)*100) if all_remates else 0, 1)
+            },
+            "remates": all_remates
+        }
+        
+        # Guardar resultado
+        output_file = "remates_result_fixed.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(resultado, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"🎯 SCRAPING COMPLETADO:")
+        logger.info(f"   📊 TOTAL REMATES: {len(all_remates)}")
+        logger.info(f"   📄 PÁGINAS: {current_page - 1}")
+        logger.info(f"   ✅ CON DETALLE: {remates_con_detalle}")
+        logger.info(f"   💰 CON PRECIO: {remates_con_precio}")
+        
+        print(f"total_remates={len(all_remates)}")
+        print(f"remates_con_detalle={remates_con_detalle}")
+        print(f"total_pages={current_page - 1}")
+        print(f"status=success")
+        
+        return resultado
+        
+    except Exception as e:
+        logger.error(f"❌ Error general: {e}")
+        print(f"status=error")
+        return {"status": "error", "error": str(e)}
+        
+    finally:
+        if driver:
+            driver.quit()
+
+if __name__ == "__main__":
+    result = scrape_all_pages_with_details()
+    print("=" * 60)
+    print(f"RESULTADO FINAL: {result.get('status')}")
+    if 'resumen' in result:
+        print(f"🎯 TOTAL REMATES: {result['resumen']['total_remates']}")
+        print(f"📄 PÁGINAS: {result['resumen']['paginas_procesadas']}")
+        print(f"✅ CON DETALLE: {result['resumen']['remates_con_detalle']}")
+        print(f"💰 CON PRECIO: {result['resumen']['remates_con_precio']}")
+        print(f"📈 COMPLETITUD: {result['resumen']['completitud_detalle_pct']}%")
