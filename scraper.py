@@ -58,10 +58,38 @@ def setup_driver():
 
 
 # ---------------------------------------------------------
+# HELPERS GENERALES
+# ---------------------------------------------------------
+
+def extract_value_from_lines(lines, labels):
+    """
+    Busca una de las etiquetas en 'labels' dentro de las líneas de texto y devuelve el valor
+    que esté:
+      - en la misma línea (después de la etiqueta), o
+      - en la línea siguiente si la línea de la etiqueta no tiene valor.
+    """
+    for i, line in enumerate(lines):
+        low = line.lower()
+        for lbl in labels:
+            lbl_low = lbl.lower()
+            if lbl_low in low:
+                # valor en la misma línea
+                idx = low.find(lbl_low)
+                after = line[idx + len(lbl):].strip(" :\t-")
+                if after:
+                    return after
+                # si no hay valor en la misma línea, tomar la siguiente
+                if i + 1 < len(lines):
+                    return lines[i + 1].strip()
+    return ""
+
+
+# ---------------------------------------------------------
 # PESTAÑA REMATE
 # ---------------------------------------------------------
 
 def extract_remate_tab_info(driver):
+    """Extraer información de la pestaña REMATE (robusto a variaciones de formato)."""
     remate_data = {
         "expediente": "",
         "distrito_judicial": "",
@@ -90,61 +118,88 @@ def extract_remate_tab_info(driver):
         page_text = driver.find_element(By.TAG_NAME, "body").text
         lines = [l.strip() for l in page_text.split("\n") if l.strip()]
 
-        for i, line in enumerate(lines):
-            if line.startswith("Expediente") and i + 1 < len(lines):
-                remate_data["expediente"] = lines[i + 1]
-            elif line.startswith("Distrito Judicial") and i + 1 < len(lines):
-                remate_data["distrito_judicial"] = lines[i + 1]
-            elif line.startswith("Órgano Jurisdiccional") and i + 1 < len(lines):
-                remate_data["organo_jurisdiccional"] = lines[i + 1]
-            elif line.startswith("Instancia") and i + 1 < len(lines):
-                remate_data["instancia"] = lines[i + 1]
-            elif line.startswith("Juez") and i + 1 < len(lines):
-                remate_data["juez"] = lines[i + 1]
-            elif line.startswith("Especialista") and i + 1 < len(lines):
-                remate_data["especialista"] = lines[i + 1]
-            elif line.startswith("Materia") and i + 1 < len(lines):
-                remate_data["materia"] = lines[i + 1]
-            elif line.startswith("Resolución") and i + 1 < len(lines):
-                remate_data["resolucion"] = lines[i + 1]
-            elif line.startswith("Fecha Resolución") and i + 1 < len(lines):
-                remate_data["fecha_resolucion"] = lines[i + 1]
-            elif line.startswith("Archivo") and i + 1 < len(lines):
-                remate_data["archivo_resolucion"] = lines[i + 1]
-            elif line.startswith("Convocatoria") and i + 1 < len(lines):
-                remate_data["convocatoria"] = lines[i + 1]
-            elif line.startswith("Tipo Cambio") and i + 1 < len(lines):
-                remate_data["tipo_cambio"] = lines[i + 1]
-            elif line.startswith("Tasación") and i + 1 < len(lines):
-                remate_data["tasacion"] = lines[i + 1]
-            elif line.startswith("Precio Base") and i + 1 < len(lines):
-                precio = lines[i + 1]
-                remate_data["precio_base"] = precio
+        # Campos texto simples
+        remate_data["expediente"] = extract_value_from_lines(
+            lines, ["Expediente"]
+        )
+        remate_data["distrito_judicial"] = extract_value_from_lines(
+            lines, ["Distrito Judicial"]
+        )
+        remate_data["organo_jurisdiccional"] = extract_value_from_lines(
+            lines,
+            [
+                "Órgano Jurisdisccional",
+                "Órgano Jurisdiccional",
+                "Organo Jurisdisccional",
+                "Organo Jurisdiccional",
+                "Organo Juris",
+            ],
+        )
+        remate_data["instancia"] = extract_value_from_lines(
+            lines, ["Instancia"]
+        )
+        remate_data["juez"] = extract_value_from_lines(
+            lines, ["Juez"]
+        )
+        remate_data["especialista"] = extract_value_from_lines(
+            lines, ["Especialista"]
+        )
+        remate_data["materia"] = extract_value_from_lines(
+            lines, ["Materia"]
+        )
+        remate_data["resolucion"] = extract_value_from_lines(
+            lines, ["Resolución"]
+        )
+        remate_data["fecha_resolucion"] = extract_value_from_lines(
+            lines, ["Fecha Resolución", "Fecha de Resolución"]
+        )
+        remate_data["archivo_resolucion"] = extract_value_from_lines(
+            lines, ["Archivo", "Archivo Resolución"]
+        )
+        remate_data["convocatoria"] = extract_value_from_lines(
+            lines, ["Convocatoria"]
+        )
+        remate_data["tipo_cambio"] = extract_value_from_lines(
+            lines, ["Tipo Cambio"]
+        )
+        remate_data["tasacion"] = extract_value_from_lines(
+            lines, ["Tasación"]
+        )
+        remate_data["incremento_ofertas"] = extract_value_from_lines(
+            lines, ["Incremento entre ofertas", "Incremento entre Ofertas"]
+        )
+        remate_data["arancel"] = extract_value_from_lines(
+            lines, ["Arancel"]
+        )
+        remate_data["oblaje"] = extract_value_from_lines(
+            lines, ["Oblaje"]
+        )
+        remate_data["descripcion_completa"] = extract_value_from_lines(
+            lines, ["Descripción"]
+        )
+        remate_data["num_inscritos"] = extract_value_from_lines(
+            lines,
+            ["N° inscritos", "N° Inscritos", "Nº inscritos", "Nº Inscritos"],
+        )
 
-                txt = precio.replace(",", "")
-                nums = re.findall(r"\d+\.?\d*", txt)
+        # Precio base: texto, monto y moneda
+        precio = extract_value_from_lines(lines, ["Precio Base"])
+        remate_data["precio_base"] = precio
 
-                if "$" in precio:
-                    remate_data["precio_base_moneda"] = "USD"
-                elif "S/" in precio or "S/." in precio:
-                    remate_data["precio_base_moneda"] = "PEN"
+        if precio:
+            txt = precio.replace(",", "")
+            nums = re.findall(r"\d+\.?\d*", txt)
 
-                if nums:
-                    try:
-                        remate_data["precio_base_numerico"] = float(nums[0])
-                    except Exception:
-                        pass
+            if "$" in precio:
+                remate_data["precio_base_moneda"] = "USD"
+            elif "S/" in precio or "S/." in precio:
+                remate_data["precio_base_moneda"] = "PEN"
 
-            elif line.startswith("Incremento entre ofertas") and i + 1 < len(lines):
-                remate_data["incremento_ofertas"] = lines[i + 1]
-            elif line.startswith("Arancel") and i + 1 < len(lines):
-                remate_data["arancel"] = lines[i + 1]
-            elif line.startswith("Oblaje") and i + 1 < len(lines):
-                remate_data["oblaje"] = lines[i + 1]
-            elif line.startswith("Descripción") and i + 1 < len(lines):
-                remate_data["descripcion_completa"] = lines[i + 1]
-            elif line.startswith("N° inscritos") and i + 1 < len(lines):
-                remate_data["num_inscritos"] = lines[i + 1]
+            if nums:
+                try:
+                    remate_data["precio_base_numerico"] = float(nums[0])
+                except Exception:
+                    pass
 
         logger.info(
             f"✅ Pestaña REMATE: Expediente {remate_data['expediente']}, "
@@ -162,6 +217,7 @@ def extract_remate_tab_info(driver):
 # ---------------------------------------------------------
 
 def extract_inmuebles_tab_info(driver):
+    """Extraer información de la pestaña INMUEBLES, incluyendo dirección y gravámenes."""
     inmuebles_data = {
         "inmueble_distrito_judicial": "",
         "inmueble_departamento": "",
@@ -176,46 +232,95 @@ def extract_inmuebles_tab_info(driver):
     }
 
     try:
+        # Ir a pestaña Inmuebles
         try:
-            tab = driver.find_element(
+            inmuebles_tab = driver.find_element(
                 By.XPATH,
                 "//a[contains(., 'Inmuebles') or contains(@href, 'inmuebles') "
                 "or contains(@onclick, 'inmuebles')]",
             )
-            driver.execute_script("arguments[0].click();", tab)
+            driver.execute_script("arguments[0].click();", inmuebles_tab)
             time.sleep(2)
             logger.info("✅ Navegó a pestaña Inmuebles")
         except Exception:
             logger.warning("⚠️ No se pudo hacer clic en pestaña Inmuebles")
 
-        page_text = driver.find_element(By.TAG_NAME, "body").text
+        body_elem = driver.find_element(By.TAG_NAME, "body")
+        page_text = body_elem.text
         lines = [l.strip() for l in page_text.split("\n") if l.strip()]
 
-        for i, line in enumerate(lines):
-            if line.startswith("Distrito Judicial") and i + 1 < len(lines):
-                inmuebles_data["inmueble_distrito_judicial"] = lines[i + 1]
-            elif line.startswith("Departamento") and i + 1 < len(lines):
-                inmuebles_data["inmueble_departamento"] = lines[i + 1]
-            elif line.startswith("Provincia") and i + 1 < len(lines):
-                inmuebles_data["inmueble_provincia"] = lines[i + 1]
-            elif line.startswith("Distrito") and i + 1 < len(lines):
-                inmuebles_data["inmueble_distrito"] = lines[i + 1]
+        # Campos generales encima de la tabla
+        inmuebles_data["inmueble_distrito_judicial"] = extract_value_from_lines(
+            lines, ["Distrito Judicial"]
+        )
+        inmuebles_data["inmueble_departamento"] = extract_value_from_lines(
+            lines, ["Departamento"]
+        )
+        inmuebles_data["inmueble_provincia"] = extract_value_from_lines(
+            lines, ["Provincia"]
+        )
+        inmuebles_data["inmueble_distrito"] = extract_value_from_lines(
+            lines, ["Distrito"]
+        )
 
-        table_text = page_text
-        partida_match = re.search(r"(P?\d{8,})", table_text)
-        if partida_match:
-            inmuebles_data["inmueble_partida_registral"] = partida_match.group(1)
+        # Tabla principal con Partida, Tipo, Dirección, Carga/Gravamen, Porcentaje, Imágenes
+        try:
+            tables = body_elem.find_elements(By.TAG_NAME, "table")
+            target_table = None
+            for t in tables:
+                if "Partida Registral" in t.text or "Partida" in t.text:
+                    target_table = t
+                    break
 
-        tipos = ["CASA", "DEPARTAMENTO", "TERRENO", "LOCAL", "OFICINA", "EDIFICIO"]
-        upper = table_text.upper()
-        for t in tipos:
-            if t in upper:
-                inmuebles_data["inmueble_tipo"] = t
-                break
+            if target_table:
+                rows = target_table.find_elements(By.XPATH, ".//tbody/tr")
+                if rows:
+                    # Tomamos la primera fila de datos (un solo inmueble por remate)
+                    first_row = rows[0]
+                    cells = first_row.find_elements(By.XPATH, ".//td")
+                    # Orden esperado:
+                    # 0: Partida Registral
+                    # 1: Tipo Inmueble
+                    # 2: Dirección
+                    # 3: Carga y/o Gravamen
+                    # 4: Porcentaje a Rematar
+                    # 5: Imágenes (si existe)
+
+                    if len(cells) >= 1:
+                        inmuebles_data["inmueble_partida_registral"] = cells[0].text.strip()
+                    if len(cells) >= 2:
+                        inmuebles_data["inmueble_tipo"] = cells[1].text.strip()
+                    if len(cells) >= 3:
+                        inmuebles_data["inmueble_direccion"] = cells[2].text.strip()
+                    if len(cells) >= 4:
+                        inmuebles_data["inmueble_cargas_gravamenes"] = cells[3].text.strip()
+                    if len(cells) >= 5:
+                        inmuebles_data["inmueble_porcentaje_rematar"] = cells[4].text.strip()
+                    if len(cells) >= 6:
+                        inmuebles_data["inmueble_imagenes"] = cells[5].text.strip()
+
+            else:
+                # Fallback: al menos intentar extraer partida por regex
+                partida_match = re.search(r"(P?\d{8,})", page_text)
+                if partida_match:
+                    inmuebles_data["inmueble_partida_registral"] = partida_match.group(1)
+
+            # Si no se llenó tipo, heurística por texto
+            if not inmuebles_data["inmueble_tipo"]:
+                tipos_inmuebles = ["CASA", "DEPARTAMENTO", "TERRENO", "LOCAL", "OFICINA", "EDIFICIO"]
+                upper = page_text.upper()
+                for tipo in tipos_inmuebles:
+                    if tipo in upper:
+                        inmuebles_data["inmueble_tipo"] = tipo
+                        break
+
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo parsear tabla de Inmuebles: {e}")
 
         logger.info(
             f"✅ Pestaña INMUEBLES: {inmuebles_data['inmueble_tipo']} "
-            f"en {inmuebles_data['inmueble_distrito']}"
+            f"en {inmuebles_data['inmueble_distrito']} "
+            f"(Partida {inmuebles_data['inmueble_partida_registral']})"
         )
 
     except Exception as e:
@@ -397,9 +502,6 @@ def extract_basic_remate_info_only(driver):
 def click_detail_by_row_index(driver, row_index):
     """
     Hacer clic en el botón 'Detalle' correspondiente a la fila dada.
-
-    Incluye verificación previa de que realmente estamos en el listado
-    (si no, intenta volver).
     """
     try:
         logger.info(f"🎯 Buscando botón Detalle para row_index={row_index}")
@@ -491,11 +593,6 @@ def click_detail_by_row_index(driver, row_index):
 def return_to_list_from_detail(driver):
     """
     Volver desde la página de detalle al listado de remates.
-
-    Estrategia:
-    1) Intentar un botón/enlace tipo 'Regresar', 'Volver', 'Atrás'.
-    2) Si no existe, usar driver.back() como fallback.
-    3) Esperar nuevamente a que aparezcan botones 'Detalle' en el listado.
     """
     try:
         back_locators = [
@@ -652,7 +749,7 @@ def scrape_all_pages_with_details():
 
         all_remates = []
         current_page = 1
-        max_pages = 100
+        max_pages = 25          # Límite explícito a 25 páginas
         failed_pages = 0
         max_failed = 3
 
@@ -736,6 +833,11 @@ def scrape_all_pages_with_details():
                 else:
                     logger.warning(f"⚠️ Página {current_page}: Sin remates encontrados")
                     failed_pages += 1
+
+                # Si ya llegamos a max_pages, no intentes navegar más
+                if current_page >= max_pages:
+                    logger.info(f"🛑 Límite de páginas alcanzado: {max_pages}")
+                    break
 
                 if navigate_to_next_page(driver, current_page + 1):
                     current_page += 1
