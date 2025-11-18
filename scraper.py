@@ -283,7 +283,6 @@ def extract_cronograma_tab_info(driver):
             # Encabezados
             header_cells = target_table.find_elements(By.XPATH, ".//thead//th")
             if not header_cells:
-                # usar primera fila como encabezado
                 header_cells = target_table.find_elements(
                     By.XPATH, ".//tbody/tr[1]/th | .//tbody/tr[1]/td"
                 )
@@ -396,15 +395,47 @@ def extract_basic_remate_info_only(driver):
 # ---------------------------------------------------------
 
 def click_detail_by_row_index(driver, row_index):
+    """
+    Hacer clic en el botón 'Detalle' correspondiente a la fila dada.
+
+    Incluye verificación previa de que realmente estamos en el listado
+    (si no, intenta volver).
+    """
     try:
         logger.info(f"🎯 Buscando botón Detalle para row_index={row_index}")
 
-        # Esperar a que haya algún Detalle en la página
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.XPATH, DETALLE_XPATH))
-        )
+        # Verificar que estamos en un listado de remates; si no, intentar volver
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            if "remate n" not in body_text and "remate n°" not in body_text:
+                logger.info(
+                    "🔁 No se detecta texto de listado de remates; intentando volver con back()"
+                )
+                try:
+                    driver.back()
+                    time.sleep(3)
+                except Exception as be:
+                    logger.warning(f"⚠️ Error al hacer back() previo: {be}")
+        except Exception:
+            pass
+
+        # Esperar a que haya botones Detalle en la página actual
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located((By.XPATH, DETALLE_XPATH))
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ No se encontraron botones Detalle en la página actual: {e}"
+            )
+            return False
+
         buttons = driver.find_elements(By.XPATH, DETALLE_XPATH)
-        logger.info(f"🔍 Botones Detalle encontrados: {len(buttons)}")
+        logger.info(f"🔍 Botones Detalle visibles en página: {len(buttons)}")
+
+        if not buttons:
+            logger.error("❌ No hay ningún botón Detalle en la página")
+            return False
 
         if row_index >= len(buttons):
             logger.error(
@@ -414,7 +445,7 @@ def click_detail_by_row_index(driver, row_index):
 
         btn = buttons[row_index]
         if not (btn.is_displayed() and btn.is_enabled()):
-            logger.error("❌ Botón Detalle no clicable")
+            logger.error("❌ Botón Detalle no está visible/habilitado")
             return False
 
         original_url = driver.current_url
@@ -429,10 +460,14 @@ def click_detail_by_row_index(driver, row_index):
         except Exception:
             driver.execute_script("arguments[0].click();", btn)
 
-        # Esperar navegación a detalle (misma pestaña)
-        WebDriverWait(driver, 10).until(
-            lambda d: d.current_url != original_url
-        )
+        # Esperar navegación (URL distinta o contenido de detalle)
+        def _detail_loaded(d):
+            if d.current_url != original_url:
+                return True
+            txt = d.find_element(By.TAG_NAME, "body").text.lower()
+            return "expediente" in txt or "tasación" in txt
+
+        WebDriverWait(driver, 10).until(_detail_loaded)
 
         txt = driver.find_element(By.TAG_NAME, "body").text.lower()
         if "expediente" in txt or "tasación" in txt:
@@ -440,7 +475,7 @@ def click_detail_by_row_index(driver, row_index):
             return True
 
         logger.warning(
-            "⚠️ Navegó tras clic en Detalle pero no se detectó texto típico de detalle"
+            "⚠️ Después del clic en Detalle no se detectó contenido típico de detalle"
         )
         return True
 
@@ -450,15 +485,75 @@ def click_detail_by_row_index(driver, row_index):
 
 
 # ---------------------------------------------------------
+# VOLVER AL LISTADO DESDE DETALLE
+# ---------------------------------------------------------
+
+def return_to_list_from_detail(driver):
+    """
+    Volver desde la página de detalle al listado de remates.
+
+    Estrategia:
+    1) Intentar un botón/enlace tipo 'Regresar', 'Volver', 'Atrás'.
+    2) Si no existe, usar driver.back() como fallback.
+    3) Esperar nuevamente a que aparezcan botones 'Detalle' en el listado.
+    """
+    try:
+        back_locators = [
+            "//button[contains(.,'Regresar') or contains(.,'Volver') or contains(.,'Atrás')]",
+            "//a[contains(.,'Regresar') or contains(.,'Volver') or contains(.,'Atrás')]",
+        ]
+
+        clicked = False
+        for locator in back_locators:
+            try:
+                el = driver.find_element(By.XPATH, locator)
+                if el.is_displayed() and el.is_enabled():
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center'});", el
+                    )
+                    time.sleep(0.5)
+                    try:
+                        el.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", el)
+                    time.sleep(3)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            logger.info("🔁 No se encontró botón 'Regresar'; usando driver.back()")
+            driver.back()
+            time.sleep(3)
+
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located((By.XPATH, DETALLE_XPATH))
+            )
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Tras volver al listado no se encontraron botones Detalle: {e}"
+            )
+
+    except Exception as e:
+        logger.warning(f"⚠️ Error en return_to_list_from_detail: {e}")
+
+
+# ---------------------------------------------------------
 # PAGINACIÓN
 # ---------------------------------------------------------
 
 def navigate_to_next_page(driver, target_page):
+    """
+    Navegación a la página indicada, soportando paginador clásico y
+    paginador PrimeFaces (ui-paginator-page / ui-paginator-next).
+    """
     try:
         logger.info(f"🔄 Navegando a página {target_page}")
         time.sleep(1)
 
-        # intentar enlace numérico
+        # 1) Intentar enlaces numéricos normales
         try:
             link = driver.find_element(
                 By.XPATH, f"//a[normalize-space(text())='{target_page}']"
@@ -475,18 +570,39 @@ def navigate_to_next_page(driver, target_page):
                 time.sleep(3)
                 return True
         except Exception as e:
-            logger.debug(f"No se encontró enlace directo a página {target_page}: {e}")
+            logger.debug(
+                f"No se encontró enlace <a> directo a página {target_page}: {e}"
+            )
 
-        # fallback siguiente
+        # 2) Intentar paginador PrimeFaces (ui-paginator-page)
+        try:
+            pages = driver.find_elements(
+                By.CSS_SELECTOR, "a.ui-paginator-page"
+            )
+            for p in pages:
+                if p.text.strip() == str(target_page):
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center'});", p
+                    )
+                    time.sleep(0.5)
+                    try:
+                        p.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", p)
+                    time.sleep(3)
+                    return True
+        except Exception as e:
+            logger.debug(
+                f"No se pudo navegar por ui-paginator-page a {target_page}: {e}"
+            )
+
+        # 3) Fallback: botón "Siguiente"
         try:
             next_selectors = [
                 "//a[normalize-space(text())='»' or normalize-space(text())='>' "
                 "or contains(normalize-space(text()), 'Siguiente') "
                 "or contains(normalize-space(text()), 'Next')]",
-                "//input[@value='»' or @value='>' or @value='Next']",
-                "//button[normalize-space(text())='»' or normalize-space(text())='>' "
-                "or contains(normalize-space(text()), 'Siguiente') "
-                "or contains(normalize-space(text()), 'Next')]",
+                "//span[contains(@class,'ui-paginator-next')]",
             ]
             for sel in next_selectors:
                 try:
@@ -605,10 +721,9 @@ def scrape_all_pages_with_details():
                                 }
                             )
 
-                        # volver al listado con back siempre
+                        # Volver al listado SIEMPRE usando la función auxiliar
                         try:
-                            driver.back()
-                            time.sleep(3)
+                            return_to_list_from_detail(driver)
                         except Exception as e:
                             logger.warning(
                                 f"⚠️ Problema al volver al listado tras remate {n}: {e}"
