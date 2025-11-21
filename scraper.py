@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-REMAJU Scraper - Versión Actualizada con Estructura Modular
-Sistema completo de scraping para remates judiciales del Poder Judicial del Perú
+REMAJU Scraper - Versión Corregida y Organizada
+Sistema de scraping para remates judiciales con estructura jerárquica modular
 
-Estructura:
-1. Módulo "Remates" - Listado principal con filtros y resultados
-2. Módulo "Detalle" - Información detallada por remate (3 tabs)
-   2.1. Tab "Remate" - Datos generales
-   2.2. Tab "Inmuebles" - Lista de bienes  
-   2.3. Tab "Cronograma" - Eventos del remate
+Estructura corregida:
+1. Módulo "Remates" (Listado Principal)
+   - Filtros aplicados
+   - Formulario de filtros  
+   - Resultados (cards repetibles)
 
-Autor: Oscar (ENGIE Energía Perú S.A.)
+2. Módulo "Detalle" (Por cada remate)
+   - Tab "Remate" (datos generales)
+   - Tab "Inmuebles" (lista de bienes)
+   - Tab "Cronograma" (eventos del remate)
+
+Autor: Oha
 Fecha: Noviembre 2025
 """
 
@@ -22,18 +26,19 @@ import time
 import logging
 import re
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
-from typing import Dict, List, Optional, Union
+from urllib.parse import urljoin
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.common.action_chains import ActionChains
 
-# Configurar logging
+# ========================================
+# CONFIGURACIÓN Y LOGGING
+# ========================================
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -44,21 +49,612 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class REMAJUScraperAdvanced:
-    """Scraper avanzado para el sistema REMAJU con arquitectura modular"""
+# Configuración global
+BASE_URL = "https://remaju.pj.gob.pe"
+MAIN_URL = f"{BASE_URL}/remaju/pages/publico/remateExterno.xhtml"
+MAX_PAGES = int(os.environ.get('MAX_PAGES', '10'))
+MAX_DETAILS = int(os.environ.get('MAX_DETAILS', '5'))
+HEADLESS = os.environ.get('HEADLESS', 'true').lower() == 'true'
+
+# Expresiones regulares útiles
+REMATE_REGEX = re.compile(r"remate\s+n[°º]?\s*(\d+)", re.IGNORECASE)
+PRECIO_REGEX = re.compile(r'(S/\.|USD|\$|€)?\s*([\d,\.]+)')
+
+# XPaths comunes
+DETALLE_XPATH = "//button[normalize-space(.)='Detalle'] | //a[normalize-space(.)='Detalle'] | //input[@value='Detalle']"
+
+# ========================================
+# CONFIGURACIÓN DEL DRIVER
+# ========================================
+
+def setup_driver():
+    """Configurar driver Chrome optimizado"""
+    try:
+        chrome_options = Options()
+        
+        if HEADLESS:
+            chrome_options.add_argument("--headless=new")
+        
+        # Opciones de optimización
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1366,768")
+        chrome_options.add_argument("--disable-plugins")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-web-security")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+        chrome_options.add_argument(
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.set_page_load_timeout(60)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        logger.info("✅ Driver configurado correctamente")
+        return driver
+        
+    except Exception as e:
+        logger.error(f"❌ Error configurando driver: {e}")
+        return None
+
+# ========================================
+# UTILIDADES COMUNES
+# ========================================
+
+def safe_find_element(driver, by, value, timeout=10, optional=False):
+    """Buscar elemento de forma segura"""
+    try:
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((by, value))
+        )
+    except TimeoutException:
+        if not optional:
+            logger.warning(f"⚠️ Elemento no encontrado: {value}")
+        return None
+
+def safe_find_elements(driver, by, value, timeout=10):
+    """Buscar múltiples elementos de forma segura"""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((by, value))
+        )
+        return driver.find_elements(by, value)
+    except TimeoutException:
+        return []
+
+def get_text_safe(element, default=""):
+    """Extraer texto de elemento de forma segura"""
+    try:
+        if element:
+            return element.get_attribute('textContent') or element.text or default
+        return default
+    except:
+        return default
+
+def extract_value_from_lines(lines, labels):
+    """Buscar etiquetas en líneas de texto y devolver valor"""
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        for label in labels:
+            label_lower = label.lower()
+            if label_lower in line_lower:
+                # Buscar valor en la misma línea
+                idx = line_lower.find(label_lower)
+                after = line[idx + len(label):].strip(" :\t-")
+                if after:
+                    return after
+                # Si no hay valor, buscar en línea siguiente
+                if i + 1 < len(lines):
+                    return lines[i + 1].strip()
+    return ""
+
+# ========================================
+# MÓDULO 1: REMATES (LISTADO)
+# ========================================
+
+class ModuloRemates:
+    """Clase para manejar el módulo de listado de remates"""
     
-    def __init__(self, headless=True, max_wait=30):
-        self.base_url = "https://remaju.pj.gob.pe"
-        self.main_url = f"{self.base_url}/remaju/pages/publico/remateExterno.xhtml"
-        self.headless = headless
-        self.max_wait = max_wait
+    def __init__(self, driver):
+        self.driver = driver
+        
+    def extract_filtros_aplicados(self):
+        """Extraer filtros aplicados actualmente"""
+        filtros = {}
+        
+        try:
+            # Buscar chips de filtros
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            
+            if "Publicación e Inscripción" in page_text:
+                filtros['fase'] = "Publicación e Inscripción"
+            
+            # Buscar botón eliminar filtros
+            clear_btn = safe_find_element(self.driver, By.XPATH, 
+                "//a[contains(., 'Limpiar')] | //button[contains(., 'Limpiar')]", 
+                optional=True)
+            filtros['eliminar_filtros'] = bool(clear_btn)
+            
+            logger.info(f"📋 Filtros aplicados: {filtros}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo filtros: {e}")
+            
+        return filtros
+    
+    def extract_formulario_filtros(self):
+        """Extraer campos del formulario de filtros"""
+        form_elements = {}
+        
+        try:
+            # Mapeo de campos comunes
+            fields = {
+                'numero_remate': "//input[@placeholder='Número de Remate' or contains(@name, 'remate')]",
+                'numero_expediente': "//input[@placeholder='Expediente' or contains(@name, 'expediente')]", 
+                'precio_base': "//input[@placeholder='Precio Base' or contains(@name, 'precio')]",
+                'tipo_inmueble': "//select[contains(@name, 'tipo') or contains(@name, 'inmueble')]",
+                'ubicacion': "//select[contains(@name, 'ubicacion') or contains(@name, 'departamento')]",
+                'fases': "//select[contains(@name, 'fase') or contains(@name, 'estado')]"
+            }
+            
+            for field_name, xpath in fields.items():
+                element = safe_find_element(self.driver, By.XPATH, xpath, optional=True)
+                form_elements[field_name] = {
+                    'available': bool(element),
+                    'type': element.tag_name if element else None
+                }
+            
+            # CAPTCHA y botón aplicar
+            captcha = safe_find_element(self.driver, By.XPATH, "//img[contains(@src, 'captcha')]", optional=True)
+            apply_btn = safe_find_element(self.driver, By.XPATH, "//input[@type='submit'] | //button[@type='submit']", optional=True)
+            
+            form_elements['captcha'] = {'available': bool(captcha)}
+            form_elements['aplicar'] = {'available': bool(apply_btn)}
+            
+            logger.info(f"📝 Formulario de filtros: {len([f for f in form_elements.values() if f.get('available')])} campos disponibles")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo formulario: {e}")
+            
+        return form_elements
+    
+    def extract_remate_card(self, card_text, card_index):
+        """Extraer datos de una tarjeta/card individual de remate"""
+        card_data = {}
+        
+        try:
+            lines = [l.strip() for l in card_text.split('\n') if l.strip()]
+            
+            # Número de remate
+            match = REMATE_REGEX.search(card_text)
+            card_data['numero_remate'] = match.group(1) if match else f"REMATE_{card_index}"
+            
+            # Número y tipo de convocatoria
+            if "PRIMERA" in card_text.upper():
+                card_data['tipo_convocatoria'] = "PRIMERA"
+                card_data['numero_convocatoria'] = "PRIMERA CONVOCATORIA"
+            elif "SEGUNDA" in card_text.upper():
+                card_data['tipo_convocatoria'] = "SEGUNDA" 
+                card_data['numero_convocatoria'] = "SEGUNDA CONVOCATORIA"
+            else:
+                card_data['tipo_convocatoria'] = ""
+                card_data['numero_convocatoria'] = ""
+            
+            # Título de la card (primera línea con "REMATE")
+            title_line = next((line for line in lines if "REMATE" in line.upper()), "")
+            card_data['titulo_card'] = title_line
+            
+            # Imagen thumbnail (por ahora no disponible)
+            card_data['thumbnail_url'] = ""
+            card_data['no_disponible'] = True
+            
+            # Tipo de remate
+            card_data['tipo_remate'] = "Judicial"  # Por defecto
+            
+            # Ubicación corta
+            ubicacion = ""
+            for line in lines:
+                if any(keyword in line.upper() for keyword in ["LIMA", "CALLAO", "AREQUIPA", "CUSCO", "TRUJILLO"]):
+                    ubicacion = line.strip()
+                    break
+            card_data['ubicacion_corta'] = ubicacion
+            
+            # Fechas (buscar patrones de fecha)
+            fecha_pattern = r'\d{1,2}/\d{1,2}/\d{4}'
+            hora_pattern = r'\d{1,2}:\d{2}'
+            
+            fecha_match = re.search(fecha_pattern, card_text)
+            hora_match = re.search(hora_pattern, card_text)
+            
+            card_data['fecha_presentacion_oferta'] = fecha_match.group() if fecha_match else ""
+            card_data['hora_presentacion_oferta'] = hora_match.group() if hora_match else ""
+            
+            # Descripción corta
+            desc_lines = [line for line in lines if len(line) > 30 and "REMATE" not in line.upper()]
+            card_data['descripcion_corta'] = desc_lines[0] if desc_lines else ""
+            
+            # Estado/fase
+            if "PUBLICACIÓN" in card_text.upper():
+                card_data['estado_fase'] = "Publicación e Inscripción"
+            else:
+                card_data['estado_fase'] = "En proceso"
+            
+            # Precio base
+            precio_match = PRECIO_REGEX.search(card_text)
+            if precio_match:
+                moneda = precio_match.group(1) or "S/."
+                numero_str = precio_match.group(2).replace(',', '').replace('.', '')
+                
+                card_data['precio_base_texto'] = f"{moneda} {precio_match.group(2)}"
+                card_data['moneda'] = moneda
+                try:
+                    # Convertir a float manejando decimales
+                    if '.' in precio_match.group(2):
+                        card_data['precio_base_numerico'] = float(precio_match.group(2).replace(',', ''))
+                    else:
+                        card_data['precio_base_numerico'] = float(numero_str)
+                except:
+                    card_data['precio_base_numerico'] = 0.0
+            else:
+                card_data['precio_base_texto'] = ""
+                card_data['precio_base_numerico'] = 0.0
+                card_data['moneda'] = ""
+            
+            # Acciones (se llenarán al encontrar botones)
+            card_data['acciones'] = {
+                'seguimiento': "",
+                'detalle': "detalle_disponible",  # Marcador genérico
+                'aviso': ""
+            }
+            
+            # Metadatos
+            card_data['card_index'] = card_index
+            
+            return card_data
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo card {card_index}: {e}")
+            return {'card_index': card_index, 'numero_remate': f"ERROR_{card_index}"}
+    
+    def extract_resultados(self):
+        """Extraer todos los resultados (cards) del listado"""
+        resultados = []
+        page_num = 1
+        
+        try:
+            while page_num <= MAX_PAGES:
+                logger.info(f"📄 Procesando página {page_num}")
+                
+                # Esperar a que cargue el contenido
+                time.sleep(2)
+                
+                # Obtener texto de toda la página para análisis
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text
+                
+                # Buscar patrones de remates en el texto
+                remate_matches = list(REMATE_REGEX.finditer(page_text))
+                
+                if not remate_matches:
+                    logger.warning(f"⚠️ No se encontraron remates en página {page_num}")
+                    break
+                
+                logger.info(f"📋 Encontrados {len(remate_matches)} remates en página {page_num}")
+                
+                # Extraer información de cada remate encontrado
+                for i, match in enumerate(remate_matches):
+                    try:
+                        # Obtener contexto alrededor del match
+                        start_pos = max(0, match.start() - 200)
+                        end_pos = min(len(page_text), match.end() + 500)
+                        remate_context = page_text[start_pos:end_pos]
+                        
+                        card_data = self.extract_remate_card(remate_context, len(resultados) + 1)
+                        card_data['pagina'] = page_num
+                        card_data['posicion_en_pagina'] = i + 1
+                        
+                        resultados.append(card_data)
+                        
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error procesando remate {i} en página {page_num}: {e}")
+                        continue
+                
+                # Navegar a siguiente página
+                if page_num >= MAX_PAGES:
+                    logger.info(f"🔄 Límite de páginas alcanzado: {MAX_PAGES}")
+                    break
+                    
+                if not self.navigate_to_next_page(page_num + 1):
+                    logger.info("🏁 No hay más páginas disponibles")
+                    break
+                    
+                page_num += 1
+            
+            logger.info(f"✅ Total resultados extraídos: {len(resultados)} remates en {page_num} páginas")
+            return resultados
+            
+        except Exception as e:
+            logger.error(f"❌ Error extrayendo resultados: {e}")
+            return resultados
+    
+    def navigate_to_next_page(self, target_page):
+        """Navegar a la página siguiente"""
+        try:
+            # Intentar enlaces numéricos
+            page_link = safe_find_element(self.driver, By.XPATH, 
+                f"//a[normalize-space(text())='{target_page}']", optional=True)
+            
+            if page_link and page_link.is_displayed():
+                self.driver.execute_script("arguments[0].click();", page_link)
+                time.sleep(3)
+                return True
+            
+            # Intentar botón "Siguiente"
+            next_button = safe_find_element(self.driver, By.XPATH,
+                "//a[contains(., 'Siguiente') or contains(., '»') or contains(., '>')]", 
+                optional=True)
+            
+            if next_button and next_button.is_displayed():
+                self.driver.execute_script("arguments[0].click();", next_button)
+                time.sleep(3)
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error navegando a página {target_page}: {e}")
+            return False
+
+# ========================================
+# MÓDULO 2: DETALLE (TABS)
+# ========================================
+
+class ModuloDetalle:
+    """Clase para manejar el módulo de detalles de remates"""
+    
+    def __init__(self, driver):
+        self.driver = driver
+    
+    def navigate_to_detail(self, card_index):
+        """Navegar al detalle de un remate específico"""
+        try:
+            # Buscar botones de detalle
+            detail_buttons = safe_find_elements(self.driver, By.XPATH, DETALLE_XPATH)
+            
+            if not detail_buttons or card_index >= len(detail_buttons):
+                logger.warning(f"⚠️ No se encontró botón detalle para índice {card_index}")
+                return False
+            
+            button = detail_buttons[card_index]
+            if not (button.is_displayed() and button.is_enabled()):
+                return False
+            
+            # Click en el botón
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", button)
+            
+            # Esperar que cargue la página de detalle
+            def detail_loaded(driver):
+                text = driver.find_element(By.TAG_NAME, "body").text.lower()
+                return "expediente" in text or "tasación" in text
+            
+            WebDriverWait(self.driver, 10).until(detail_loaded)
+            logger.info(f"✅ Navegado al detalle (índice {card_index})")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error navegando al detalle: {e}")
+            return False
+    
+    def return_to_listing(self):
+        """Volver al listado desde el detalle"""
+        try:
+            # Buscar botón regresar
+            back_button = safe_find_element(self.driver, By.XPATH,
+                "//button[contains(.,'Regresar')] | //a[contains(.,'Regresar')]",
+                optional=True)
+            
+            if back_button and back_button.is_displayed():
+                self.driver.execute_script("arguments[0].click();", back_button)
+                time.sleep(3)
+            else:
+                # Fallback: usar navegación del browser
+                self.driver.back()
+                time.sleep(3)
+            
+            # Esperar que cargue el listado
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, DETALLE_XPATH))
+            )
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error volviendo al listado: {e}")
+    
+    def extract_tab_remate(self):
+        """Extraer datos del Tab 'Remate' (datos generales)"""
+        try:
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            lines = [l.strip() for l in page_text.split('\n') if l.strip()]
+            
+            # Bloque expediente/juzgado
+            bloque_expediente = {
+                'expediente': extract_value_from_lines(lines, ["Expediente"]),
+                'distrito_judicial': extract_value_from_lines(lines, ["Distrito Judicial"]),
+                'organo_jurisdiccional': extract_value_from_lines(lines, [
+                    "Órgano Jurisdiccional", "Organo Jurisdiccional", "Órgano Jurisdisccional"
+                ]),
+                'instancia': extract_value_from_lines(lines, ["Instancia"]),
+                'juez': extract_value_from_lines(lines, ["Juez"]),
+                'especialista': extract_value_from_lines(lines, ["Especialista"]),
+                'materia': extract_value_from_lines(lines, ["Materia"]),
+                'resolucion': extract_value_from_lines(lines, ["Resolución"]),
+                'fecha_resolucion': extract_value_from_lines(lines, ["Fecha Resolución", "Fecha de Resolución"]),
+                'archivo_resolucion_url': ""  # Se llenaría si hay enlaces
+            }
+            
+            # Bloque económico/convocatoria
+            bloque_economico = {
+                'convocatoria': extract_value_from_lines(lines, ["Convocatoria"]),
+                'tipo_cambio': extract_value_from_lines(lines, ["Tipo Cambio"]),
+                'tasacion': extract_value_from_lines(lines, ["Tasación"]),
+                'precio_base': extract_value_from_lines(lines, ["Precio Base"]),
+                'incremento_ofertas': extract_value_from_lines(lines, ["Incremento entre ofertas"]),
+                'arancel': extract_value_from_lines(lines, ["Arancel"]),
+                'oblaje': extract_value_from_lines(lines, ["Oblaje"]),
+                'descripcion_completa': extract_value_from_lines(lines, ["Descripción"])
+            }
+            
+            # Indicadores
+            inscritos_text = extract_value_from_lines(lines, ["N° inscritos", "Nº inscritos"])
+            num_inscritos = 0
+            if inscritos_text:
+                match = re.search(r'\d+', inscritos_text)
+                num_inscritos = int(match.group()) if match else 0
+            
+            indicadores = {
+                'num_inscritos': num_inscritos,
+                'regresar': True
+            }
+            
+            return {
+                'bloque_expediente': bloque_expediente,
+                'bloque_economico': bloque_economico,
+                'indicadores': indicadores
+            }
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo tab Remate: {e}")
+            return {}
+    
+    def extract_tab_inmuebles(self):
+        """Extraer datos del Tab 'Inmuebles' (lista de bienes)"""
+        try:
+            # Intentar hacer clic en tab Inmuebles
+            inmuebles_tab = safe_find_element(self.driver, By.XPATH,
+                "//a[contains(., 'Inmuebles')] | //button[contains(., 'Inmuebles')]",
+                optional=True)
+            
+            if inmuebles_tab:
+                self.driver.execute_script("arguments[0].click();", inmuebles_tab)
+                time.sleep(2)
+            
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            lines = [l.strip() for l in page_text.split('\n') if l.strip()]
+            
+            # Buscar tabla de inmuebles
+            inmuebles = []
+            
+            # Datos del primer inmueble (asumiendo uno por remate)
+            inmueble_data = {
+                'partida_registral': extract_value_from_lines(lines, ["Partida Registral", "Partida"]),
+                'tipo_inmueble': extract_value_from_lines(lines, ["Tipo", "Tipo Inmueble"]),
+                'direccion': extract_value_from_lines(lines, ["Dirección", "Direccion", "Ubicación"]),
+                'cargas_gravamenes': extract_value_from_lines(lines, ["Carga", "Gravamen"]),
+                'porcentaje_a_rematar': 100.0,  # Por defecto
+                'imagenes_refs': {
+                    'count': 0,
+                    'urls': []
+                },
+                'orden': 1
+            }
+            
+            # Buscar porcentaje específico
+            porcentaje_text = extract_value_from_lines(lines, ["Porcentaje"])
+            if porcentaje_text:
+                match = re.search(r'(\d+(?:\.\d+)?)%?', porcentaje_text)
+                if match:
+                    inmueble_data['porcentaje_a_rematar'] = float(match.group(1))
+            
+            if inmueble_data['partida_registral'] or inmueble_data['direccion']:
+                inmuebles.append(inmueble_data)
+            
+            logger.info(f"✅ Tab Inmuebles: {len(inmuebles)} inmuebles extraídos")
+            return inmuebles
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo tab Inmuebles: {e}")
+            return []
+    
+    def extract_tab_cronograma(self):
+        """Extraer datos del Tab 'Cronograma' (eventos del remate)"""
+        try:
+            # Intentar hacer clic en tab Cronograma
+            cronograma_tab = safe_find_element(self.driver, By.XPATH,
+                "//a[contains(., 'Cronograma')] | //button[contains(., 'Cronograma')]",
+                optional=True)
+            
+            if cronograma_tab:
+                self.driver.execute_script("arguments[0].click();", cronograma_tab)
+                time.sleep(2)
+            
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            
+            # Buscar eventos típicos en el cronograma
+            eventos = []
+            
+            # Eventos comunes en cronogramas
+            eventos_comunes = [
+                "Inscripción",
+                "Exhibición", 
+                "Presentación de ofertas",
+                "Acto de remate"
+            ]
+            
+            for i, evento_tipo in enumerate(eventos_comunes):
+                if evento_tipo.lower() in page_text.lower():
+                    # Buscar fechas cercanas al evento
+                    fecha_match = re.search(rf'{evento_tipo}.*?(\d{{1,2}}/\d{{1,2}}/\d{{4}})', page_text, re.IGNORECASE)
+                    hora_match = re.search(rf'{evento_tipo}.*?(\d{{1,2}}:\d{{2}})', page_text, re.IGNORECASE)
+                    
+                    evento_data = {
+                        'hito': evento_tipo,
+                        'evento': evento_tipo,
+                        'fecha': fecha_match.group(1) if fecha_match else "",
+                        'hora': hora_match.group(1) if hora_match else "",
+                        'observacion': "",
+                        'orden': i + 1,
+                        'regresar': True
+                    }
+                    eventos.append(evento_data)
+            
+            logger.info(f"✅ Tab Cronograma: {len(eventos)} eventos extraídos")
+            return eventos
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo tab Cronograma: {e}")
+            return []
+    
+    def extract_complete_details(self):
+        """Extraer detalles completos (todos los tabs)"""
+        try:
+            detalle = {
+                'tab_remate': self.extract_tab_remate(),
+                'tab_inmuebles': self.extract_tab_inmuebles(), 
+                'tab_cronograma': self.extract_tab_cronograma()
+            }
+            
+            logger.info("✅ Detalles completos extraídos")
+            return detalle
+            
+        except Exception as e:
+            logger.error(f"❌ Error extrayendo detalles completos: {e}")
+            return {}
+
+# ========================================
+# CLASE PRINCIPAL DEL SCRAPER
+# ========================================
+
+class REMAJUScraperOrganizado:
+    """Scraper principal organizado con estructura jerárquica modular"""
+    
+    def __init__(self):
         self.driver = None
-        self.wait = None
-        
-        # Configuración para GitHub Actions
-        self.is_github_actions = os.environ.get('GITHUB_ACTIONS') == 'true'
-        
-        # Estadísticas
+        self.modulo_remates = None
+        self.modulo_detalle = None
         self.stats = {
             'start_time': datetime.now(),
             'total_remates': 0,
@@ -66,778 +662,129 @@ class REMAJUScraperAdvanced:
             'errors': 0,
             'pages_processed': 0
         }
-        
-        # Cache para evitar reprocessamiento
-        self.processed_remates = set()
-
-    def setup_driver(self):
-        """Configurar el driver de Chrome optimizado"""
+    
+    def setup(self):
+        """Configurar el scraper"""
         try:
-            chrome_options = Options()
+            self.driver = setup_driver()
+            if not self.driver:
+                return False
             
-            if self.headless:
-                chrome_options.add_argument('--headless=new')
+            self.modulo_remates = ModuloRemates(self.driver)
+            self.modulo_detalle = ModuloDetalle(self.driver)
             
-            # Opciones optimizadas para GitHub Actions y estabilidad
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--disable-web-security')
-            chrome_options.add_argument('--disable-extensions')
-            chrome_options.add_argument('--disable-plugins')
-            chrome_options.add_argument('--disable-images')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            
-            # Optimizaciones de rendimiento
-            chrome_options.add_argument('--disable-background-timer-throttling')
-            chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-            chrome_options.add_argument('--disable-renderer-backgrounding')
-            chrome_options.add_argument('--memory-pressure-off')
-            
-            self.driver = webdriver.Chrome(options=chrome_options)
-            self.driver.set_page_load_timeout(60)
-            self.wait = WebDriverWait(self.driver, self.max_wait)
-            
-            logger.info("✅ Driver configurado correctamente")
+            logger.info("✅ Scraper configurado correctamente")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error configurando driver: {e}")
+            logger.error(f"❌ Error configurando scraper: {e}")
             return False
-
-    def safe_find_element(self, by, value, timeout=10, optional=False):
-        """Buscar elemento de forma segura con reintentos"""
-        try:
-            element = WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((by, value))
-            )
-            return element
-        except TimeoutException:
-            if not optional:
-                logger.warning(f"⚠️ Elemento no encontrado: {by}={value}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ Error buscando elemento {by}={value}: {e}")
-            return None
-
-    def safe_find_elements(self, by, value, timeout=10):
-        """Buscar múltiples elementos de forma segura"""
-        try:
-            self.wait.until(EC.presence_of_element_located((by, value)))
-            return self.driver.find_elements(by, value)
-        except TimeoutException:
-            logger.warning(f"⚠️ Elementos no encontrados: {by}={value}")
-            return []
-        except Exception as e:
-            logger.error(f"❌ Error buscando elementos {by}={value}: {e}")
-            return []
-
-    def get_text_safe(self, element, default=""):
-        """Extraer texto de elemento de forma segura"""
-        try:
-            if element:
-                text = element.get_attribute('textContent') or element.text or ""
-                return text.strip()
-            return default
-        except Exception as e:
-            logger.warning(f"⚠️ Error obteniendo texto: {e}")
-            return default
-
-    def get_attribute_safe(self, element, attribute, default=""):
-        """Obtener atributo de elemento de forma segura"""
-        try:
-            if element:
-                return element.get_attribute(attribute) or default
-            return default
-        except Exception as e:
-            logger.warning(f"⚠️ Error obteniendo atributo {attribute}: {e}")
-            return default
-
+    
     def navigate_to_main_page(self):
-        """Navegar a la página principal de REMAJU"""
+        """Navegar a la página principal"""
         try:
             logger.info("🌐 Navegando a REMAJU...")
-            self.driver.get(self.main_url)
+            self.driver.get(MAIN_URL)
+            time.sleep(5)  # Tiempo para CAPTCHA manual si es necesario
             
-            # Esperar a que cargue la página
-            time.sleep(3)
+            # Verificar que cargó correctamente
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
             
-            # Verificar que la página cargó correctamente
-            page_title = self.driver.title
-            logger.info(f"📄 Título de página: {page_title}")
-            
-            # Esperar a que aparezcan los elementos principales
-            self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            
+            logger.info("✅ Página principal cargada")
             return True
             
         except Exception as e:
             logger.error(f"❌ Error navegando a página principal: {e}")
             return False
-
-    def extract_filters_applied(self):
-        """Extraer filtros aplicados actualmente"""
-        filters = {}
-        
-        try:
-            # Buscar chips de filtros aplicados
-            filter_chips = self.safe_find_elements(By.CSS_SELECTOR, ".filter-chip, .ui-selectcheckboxmenu-token")
-            
-            for chip in filter_chips:
-                filter_text = self.get_text_safe(chip)
-                if filter_text and "fase" in filter_text.lower():
-                    filters['fase'] = filter_text
-                    
-            # Buscar botón eliminar filtros
-            clear_filters_btn = self.safe_find_element(By.CSS_SELECTOR, 
-                "a[title*='Limpiar'], button[title*='Limpiar'], .clear-filters", 
-                optional=True)
-            
-            if clear_filters_btn:
-                filters['eliminar_filtros'] = True
-                
-            logger.info(f"📋 Filtros aplicados encontrados: {filters}")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo filtros aplicados: {e}")
-            
-        return filters
-
-    def extract_filter_form_elements(self):
-        """Extraer elementos del formulario de filtros"""
-        form_elements = {}
-        
-        try:
-            # Mapeo de campos del formulario
-            field_mappings = {
-                'numero_remate': ['input[name*="remate"]', 'input[placeholder*="remate"]', '#numeroRemate'],
-                'numero_expediente': ['input[name*="expediente"]', 'input[placeholder*="expediente"]', '#numeroExpediente'],
-                'precio_base': ['input[name*="precio"]', 'input[placeholder*="precio"]', '#precioBase'],
-                'tipo_inmueble': ['select[name*="tipo"]', 'select[name*="inmueble"]', '#tipoInmueble'],
-                'ubicacion': ['input[name*="ubicacion"]', 'select[name*="ubicacion"]', '#ubicacion'],
-                'fases': ['select[name*="fase"]', 'select[name*="estado"]', '#fases']
-            }
-            
-            for field_name, selectors in field_mappings.items():
-                for selector in selectors:
-                    element = self.safe_find_element(By.CSS_SELECTOR, selector, optional=True)
-                    if element:
-                        form_elements[field_name] = {
-                            'element_type': element.tag_name,
-                            'name': self.get_attribute_safe(element, 'name'),
-                            'id': self.get_attribute_safe(element, 'id'),
-                            'placeholder': self.get_attribute_safe(element, 'placeholder'),
-                            'available': True
-                        }
-                        break
-                else:
-                    form_elements[field_name] = {'available': False}
-            
-            # Buscar CAPTCHA
-            captcha_element = self.safe_find_element(By.CSS_SELECTOR, 
-                ".captcha, img[src*='captcha'], #captcha", optional=True)
-            form_elements['captcha'] = {'available': bool(captcha_element)}
-            
-            # Buscar botón aplicar
-            apply_button = self.safe_find_element(By.CSS_SELECTOR,
-                "button[type='submit'], input[type='submit'], .btn-search, .aplicar", optional=True)
-            form_elements['aplicar'] = {'available': bool(apply_button)}
-            
-            logger.info(f"📝 Elementos del formulario: {len(form_elements)} encontrados")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo elementos del formulario: {e}")
-            
-        return form_elements
-
-    def extract_remate_card_data(self, card_element):
-        """Extraer datos de una tarjeta de remate individual"""
-        try:
-            remate_data = {}
-            
-            # Número de remate
-            numero_elem = card_element.find_element(By.CSS_SELECTOR, 
-                ".numero-remate, .remate-number, strong:first-child") if card_element else None
-            remate_data['numero_remate'] = self.get_text_safe(numero_elem)
-            
-            # Número y tipo de convocatoria
-            convocatoria_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".convocatoria, .tipo-convocatoria") if card_element else None
-            convocatoria_text = self.get_text_safe(convocatoria_elem)
-            
-            # Extraer tipo (PRIMERA, SEGUNDA, etc.)
-            if "PRIMERA" in convocatoria_text.upper():
-                remate_data['tipo_convocatoria'] = "PRIMERA"
-            elif "SEGUNDA" in convocatoria_text.upper():
-                remate_data['tipo_convocatoria'] = "SEGUNDA"
-            else:
-                remate_data['tipo_convocatoria'] = convocatoria_text
-                
-            remate_data['numero_convocatoria'] = convocatoria_text
-            
-            # Título de la tarjeta
-            title_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".titulo, .card-title, h3, h4") if card_element else None
-            remate_data['titulo_card'] = self.get_text_safe(title_elem)
-            
-            # Imagen thumbnail
-            img_elem = card_element.find_element(By.CSS_SELECTOR, "img") if card_element else None
-            if img_elem:
-                img_src = self.get_attribute_safe(img_elem, 'src')
-                if img_src and 'no-disponible' not in img_src.lower():
-                    remate_data['thumbnail_url'] = urljoin(self.base_url, img_src)
-                    remate_data['no_disponible'] = False
-                else:
-                    remate_data['no_disponible'] = True
-            else:
-                remate_data['no_disponible'] = True
-                
-            # Tipo de remate
-            tipo_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".tipo-remate, .tipo") if card_element else None
-            remate_data['tipo_remate'] = self.get_text_safe(tipo_elem)
-            
-            # Ubicación corta
-            ubicacion_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".ubicacion, .direccion") if card_element else None
-            remate_data['ubicacion_corta'] = self.get_text_safe(ubicacion_elem)
-            
-            # Fecha y hora de presentación de oferta
-            fecha_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".fecha-presentacion, .fecha-oferta") if card_element else None
-            fecha_text = self.get_text_safe(fecha_elem)
-            
-            # Parsear fecha y hora
-            if fecha_text:
-                # Intentar extraer fecha y hora con regex
-                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', fecha_text)
-                hora_match = re.search(r'(\d{1,2}:\d{2})', fecha_text)
-                
-                remate_data['fecha_presentacion_oferta'] = fecha_match.group(1) if fecha_match else fecha_text
-                remate_data['hora_presentacion_oferta'] = hora_match.group(1) if hora_match else ""
-            
-            # Descripción corta
-            desc_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".descripcion, .descripcion-corta, p") if card_element else None
-            remate_data['descripcion_corta'] = self.get_text_safe(desc_elem)
-            
-            # Estado/fase
-            estado_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".estado, .fase, .estado-fase") if card_element else None
-            remate_data['estado_fase'] = self.get_text_safe(estado_elem)
-            
-            # Precio base
-            precio_elem = card_element.find_element(By.CSS_SELECTOR,
-                ".precio, .precio-base") if card_element else None
-            precio_text = self.get_text_safe(precio_elem)
-            
-            if precio_text:
-                remate_data['precio_base_texto'] = precio_text
-                
-                # Extraer moneda y valor numérico
-                moneda_match = re.search(r'(S/\.|USD|\$|€)', precio_text)
-                remate_data['moneda'] = moneda_match.group(1) if moneda_match else "S/."
-                
-                # Extraer número
-                numero_match = re.search(r'[\d,\.]+', precio_text.replace(',', ''))
-                if numero_match:
-                    try:
-                        remate_data['precio_base_numerico'] = float(numero_match.group(0))
-                    except:
-                        remate_data['precio_base_numerico'] = 0
-                else:
-                    remate_data['precio_base_numerico'] = 0
-            
-            # Enlaces de acción
-            acciones = {}
-            
-            # Buscar enlaces de seguimiento, detalle y aviso
-            action_links = card_element.find_elements(By.CSS_SELECTOR, "a, button") if card_element else []
-            
-            for link in action_links:
-                link_text = self.get_text_safe(link).lower()
-                href = self.get_attribute_safe(link, 'href')
-                onclick = self.get_attribute_safe(link, 'onclick')
-                
-                if 'seguimiento' in link_text:
-                    acciones['seguimiento'] = href or onclick
-                elif 'detalle' in link_text or 'ver' in link_text:
-                    acciones['detalle'] = href or onclick
-                elif 'aviso' in link_text:
-                    acciones['aviso'] = href or onclick
-                    
-            remate_data['acciones'] = acciones
-            
-            return remate_data
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo datos de tarjeta: {e}")
-            return {}
-
-    def extract_remate_listings(self):
-        """Extraer listado completo de remates con paginación"""
-        all_remates = []
-        page_num = 1
-        max_pages = int(os.environ.get('MAX_PAGES', '10'))  # Límite de páginas
-        
-        try:
-            while True:
-                logger.info(f"📄 Procesando página {page_num}...")
-                
-                # Esperar a que cargue el contenido
-                time.sleep(2)
-                
-                # Buscar tarjetas de remates
-                remate_cards = self.safe_find_elements(By.CSS_SELECTOR, 
-                    ".remate-card, .card-remate, .resultado-item, .item-remate")
-                
-                if not remate_cards:
-                    # Intentar selectores alternativos
-                    remate_cards = self.safe_find_elements(By.CSS_SELECTOR,
-                        "div[class*='remate'], div[class*='card'], .list-item")
-                
-                if not remate_cards:
-                    logger.warning(f"⚠️ No se encontraron tarjetas en página {page_num}")
-                    break
-                
-                logger.info(f"📋 Encontradas {len(remate_cards)} tarjetas en página {page_num}")
-                
-                # Extraer datos de cada tarjeta
-                for i, card in enumerate(remate_cards):
-                    try:
-                        remate_data = self.extract_remate_card_data(card)
-                        if remate_data and remate_data.get('numero_remate'):
-                            remate_data['pagina'] = page_num
-                            remate_data['posicion_en_pagina'] = i + 1
-                            all_remates.append(remate_data)
-                            
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error procesando tarjeta {i}: {e}")
-                        continue
-                
-                self.stats['pages_processed'] = page_num
-                
-                # Verificar si hay siguiente página
-                if max_pages > 0 and page_num >= max_pages:
-                    logger.info(f"🔄 Límite de páginas alcanzado: {max_pages}")
-                    break
-                
-                # Buscar y hacer clic en "siguiente página"
-                next_button = self.safe_find_element(By.CSS_SELECTOR,
-                    ".ui-paginator-next, .next-page, a[title*='Siguiente'], button[title*='Siguiente']",
-                    optional=True, timeout=5)
-                
-                if not next_button or 'disabled' in (next_button.get_attribute('class') or ''):
-                    logger.info(f"🏁 No hay más páginas después de la página {page_num}")
-                    break
-                
-                try:
-                    # Hacer clic en siguiente página
-                    self.driver.execute_script("arguments[0].click();", next_button)
-                    page_num += 1
-                    
-                    # Esperar a que cambie la página
-                    time.sleep(3)
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Error navegando a página siguiente: {e}")
-                    break
-            
-            self.stats['total_remates'] = len(all_remates)
-            logger.info(f"✅ Listado completo: {len(all_remates)} remates en {page_num} páginas")
-            
-            return all_remates
-            
-        except Exception as e:
-            logger.error(f"❌ Error extrayendo listado de remates: {e}")
-            return all_remates
-
-    def navigate_to_remate_detail(self, remate_data):
-        """Navegar al detalle de un remate específico"""
-        try:
-            detalle_link = remate_data.get('acciones', {}).get('detalle')
-            
-            if not detalle_link:
-                logger.warning(f"⚠️ No hay enlace de detalle para remate {remate_data.get('numero_remate')}")
-                return False
-                
-            # Si es onclick, ejecutar JavaScript
-            if detalle_link.startswith('javascript:') or 'javascript:' in detalle_link:
-                self.driver.execute_script(detalle_link.replace('javascript:', ''))
-            else:
-                # Si es URL directa, navegar
-                if not detalle_link.startswith('http'):
-                    detalle_link = urljoin(self.base_url, detalle_link)
-                self.driver.get(detalle_link)
-            
-            # Esperar a que cargue la página de detalle
-            time.sleep(3)
-            
-            return True
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error navegando al detalle: {e}")
-            return False
-
-    def extract_tab_remate_data(self):
-        """Extraer datos del Tab 'Remate' (datos generales)"""
-        tab_data = {}
-        
-        try:
-            # Activar tab si es necesario
-            remate_tab = self.safe_find_element(By.CSS_SELECTOR,
-                "a[href*='remate'], .tab-remate, li[data-tab='remate']", optional=True)
-            if remate_tab:
-                remate_tab.click()
-                time.sleep(1)
-            
-            # Bloque expediente/juzgado
-            expediente_data = {}
-            
-            field_mappings = {
-                'expediente': ['.expediente', '.numero-expediente', 'span[id*="expediente"]'],
-                'distrito_judicial': ['.distrito-judicial', '.distrito', 'span[id*="distrito"]'],
-                'organo_jurisdiccional': ['.organo-jurisdiccional', '.juzgado', 'span[id*="organo"]'],
-                'instancia': ['.instancia', 'span[id*="instancia"]'],
-                'juez': ['.juez', '.magistrado', 'span[id*="juez"]'],
-                'especialista': ['.especialista', 'span[id*="especialista"]'],
-                'materia': ['.materia', 'span[id*="materia"]'],
-                'resolucion': ['.resolucion', 'span[id*="resolucion"]'],
-                'fecha_resolucion': ['.fecha-resolucion', 'span[id*="fecha"]'],
-                'archivo_resolucion_url': ['a[href*="resolucion"]', 'a[href*="archivo"]']
-            }
-            
-            for field_name, selectors in field_mappings.items():
-                for selector in selectors:
-                    element = self.safe_find_element(By.CSS_SELECTOR, selector, optional=True)
-                    if element:
-                        if field_name == 'archivo_resolucion_url':
-                            href = self.get_attribute_safe(element, 'href')
-                            if href:
-                                expediente_data[field_name] = urljoin(self.base_url, href)
-                        else:
-                            expediente_data[field_name] = self.get_text_safe(element)
-                        break
-                else:
-                    expediente_data[field_name] = ""
-            
-            tab_data['bloque_expediente'] = expediente_data
-            
-            # Bloque económico/convocatoria
-            economico_data = {}
-            
-            economico_mappings = {
-                'convocatoria': ['.convocatoria', 'span[id*="convocatoria"]'],
-                'tipo_cambio': ['.tipo-cambio', 'span[id*="cambio"]'],
-                'tasacion': ['.tasacion', 'span[id*="tasacion"]'],
-                'precio_base': ['.precio-base', 'span[id*="precio"]'],
-                'incremento_ofertas': ['.incremento', 'span[id*="incremento"]'],
-                'arancel': ['.arancel', 'span[id*="arancel"]'],
-                'oblaje': ['.oblaje', 'span[id*="oblaje"]'],
-                'descripcion_completa': ['.descripcion-completa', '.descripcion-detallada', 'textarea[id*="descripcion"]']
-            }
-            
-            for field_name, selectors in economico_mappings.items():
-                for selector in selectors:
-                    element = self.safe_find_element(By.CSS_SELECTOR, selector, optional=True)
-                    if element:
-                        economico_data[field_name] = self.get_text_safe(element)
-                        break
-                else:
-                    economico_data[field_name] = ""
-            
-            tab_data['bloque_economico'] = economico_data
-            
-            # Indicadores
-            indicadores_data = {}
-            
-            # Número de inscritos
-            inscritos_elem = self.safe_find_element(By.CSS_SELECTOR,
-                '.num-inscritos, .inscritos, span[id*="inscritos"]', optional=True)
-            inscritos_text = self.get_text_safe(inscritos_elem)
-            
-            if inscritos_text:
-                # Extraer número
-                numero_match = re.search(r'\d+', inscritos_text)
-                indicadores_data['num_inscritos'] = int(numero_match.group(0)) if numero_match else 0
-            else:
-                indicadores_data['num_inscritos'] = 0
-            
-            # Botón regresar
-            regresar_btn = self.safe_find_element(By.CSS_SELECTOR,
-                '.btn-regresar, .regresar, button[value*="Regresar"]', optional=True)
-            indicadores_data['regresar'] = bool(regresar_btn)
-            
-            tab_data['indicadores'] = indicadores_data
-            
-            logger.info("✅ Datos del tab 'Remate' extraídos")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo tab Remate: {e}")
-            
-        return tab_data
-
-    def extract_tab_inmuebles_data(self):
-        """Extraer datos del Tab 'Inmuebles' (lista de bienes)"""
-        tab_data = []
-        
-        try:
-            # Activar tab si es necesario
-            inmuebles_tab = self.safe_find_element(By.CSS_SELECTOR,
-                "a[href*='inmuebles'], .tab-inmuebles, li[data-tab='inmuebles']", optional=True)
-            if inmuebles_tab:
-                inmuebles_tab.click()
-                time.sleep(2)
-            
-            # Buscar tabla o lista de inmuebles
-            inmuebles_containers = self.safe_find_elements(By.CSS_SELECTOR,
-                ".inmueble-item, .bien-item, tr[class*='inmueble'], .lista-inmuebles .item")
-            
-            if not inmuebles_containers:
-                # Buscar en tabla estándar
-                inmuebles_containers = self.safe_find_elements(By.CSS_SELECTOR, "tbody tr")
-            
-            logger.info(f"📋 Encontrados {len(inmuebles_containers)} inmuebles")
-            
-            for i, container in enumerate(inmuebles_containers):
-                try:
-                    inmueble_data = {}
-                    
-                    # Partida registral
-                    partida_elem = container.find_element(By.CSS_SELECTOR,
-                        ".partida-registral, .partida, td:nth-child(1)") if container else None
-                    inmueble_data['partida_registral'] = self.get_text_safe(partida_elem)
-                    
-                    # Tipo de inmueble
-                    tipo_elem = container.find_element(By.CSS_SELECTOR,
-                        ".tipo-inmueble, .tipo, td:nth-child(2)") if container else None
-                    inmueble_data['tipo_inmueble'] = self.get_text_safe(tipo_elem)
-                    
-                    # Dirección
-                    direccion_elem = container.find_element(By.CSS_SELECTOR,
-                        ".direccion, .ubicacion, td:nth-child(3)") if container else None
-                    inmueble_data['direccion'] = self.get_text_safe(direccion_elem)
-                    
-                    # Cargas y gravámenes
-                    cargas_elem = container.find_element(By.CSS_SELECTOR,
-                        ".cargas-gravamenes, .cargas, td:nth-child(4)") if container else None
-                    inmueble_data['cargas_gravamenes'] = self.get_text_safe(cargas_elem)
-                    
-                    # Porcentaje a rematar
-                    porcentaje_elem = container.find_element(By.CSS_SELECTOR,
-                        ".porcentaje-rematar, .porcentaje, td:nth-child(5)") if container else None
-                    porcentaje_text = self.get_text_safe(porcentaje_elem)
-                    
-                    # Extraer número del porcentaje
-                    if porcentaje_text:
-                        porcentaje_match = re.search(r'(\d+(?:\.\d+)?)%?', porcentaje_text)
-                        inmueble_data['porcentaje_a_rematar'] = float(porcentaje_match.group(1)) if porcentaje_match else 100.0
-                    else:
-                        inmueble_data['porcentaje_a_rematar'] = 100.0
-                    
-                    # Imágenes (contador/referencias)
-                    imagenes_links = container.find_elements(By.CSS_SELECTOR, "a[href*='imagen'], img") if container else []
-                    
-                    if imagenes_links:
-                        inmueble_data['imagenes_refs'] = {
-                            'count': len(imagenes_links),
-                            'urls': [urljoin(self.base_url, img.get_attribute('href') or img.get_attribute('src'))
-                                    for img in imagenes_links if img.get_attribute('href') or img.get_attribute('src')]
-                        }
-                    else:
-                        inmueble_data['imagenes_refs'] = {'count': 0, 'urls': []}
-                    
-                    inmueble_data['orden'] = i + 1
-                    tab_data.append(inmueble_data)
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Error procesando inmueble {i}: {e}")
-                    continue
-            
-            logger.info(f"✅ Datos del tab 'Inmuebles' extraídos: {len(tab_data)} items")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo tab Inmuebles: {e}")
-            
-        return tab_data
-
-    def extract_tab_cronograma_data(self):
-        """Extraer datos del Tab 'Cronograma' (eventos del remate)"""
-        tab_data = []
-        
-        try:
-            # Activar tab si es necesario
-            cronograma_tab = self.safe_find_element(By.CSS_SELECTOR,
-                "a[href*='cronograma'], .tab-cronograma, li[data-tab='cronograma']", optional=True)
-            if cronograma_tab:
-                cronograma_tab.click()
-                time.sleep(2)
-            
-            # Buscar tabla de cronograma
-            cronograma_rows = self.safe_find_elements(By.CSS_SELECTOR,
-                ".cronograma-item, .evento-item, tr[class*='cronograma'], tbody tr")
-            
-            logger.info(f"📋 Encontrados {len(cronograma_rows)} eventos en cronograma")
-            
-            for i, row in enumerate(cronograma_rows):
-                try:
-                    evento_data = {}
-                    
-                    # Hito/evento
-                    hito_elem = row.find_element(By.CSS_SELECTOR,
-                        ".hito, .evento, .tipo-evento, td:nth-child(1)") if row else None
-                    evento_data['hito'] = self.get_text_safe(hito_elem)
-                    evento_data['evento'] = evento_data['hito']  # Alias
-                    
-                    # Fecha
-                    fecha_elem = row.find_element(By.CSS_SELECTOR,
-                        ".fecha, .fecha-evento, td:nth-child(2)") if row else None
-                    evento_data['fecha'] = self.get_text_safe(fecha_elem)
-                    
-                    # Hora
-                    hora_elem = row.find_element(By.CSS_SELECTOR,
-                        ".hora, .hora-evento, td:nth-child(3)") if row else None
-                    evento_data['hora'] = self.get_text_safe(hora_elem)
-                    
-                    # Observación
-                    obs_elem = row.find_element(By.CSS_SELECTOR,
-                        ".observacion, .observaciones, .notas, td:nth-child(4)") if row else None
-                    evento_data['observacion'] = self.get_text_safe(obs_elem)
-                    
-                    evento_data['orden'] = i + 1
-                    
-                    if evento_data['hito'] or evento_data['fecha']:  # Solo agregar si tiene contenido
-                        tab_data.append(evento_data)
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Error procesando evento {i}: {e}")
-                    continue
-            
-            # Buscar botón regresar en cronograma
-            regresar_btn = self.safe_find_element(By.CSS_SELECTOR,
-                '.btn-regresar, .regresar, button[value*="Regresar"]', optional=True)
-            
-            if regresar_btn:
-                for evento in tab_data:
-                    evento['regresar'] = True
-            
-            logger.info(f"✅ Datos del tab 'Cronograma' extraídos: {len(tab_data)} eventos")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo tab Cronograma: {e}")
-            
-        return tab_data
-
-    def extract_complete_remate_details(self, remate_data):
-        """Extraer detalles completos de un remate (todos los tabs)"""
-        complete_details = {
-            'numero_remate': remate_data.get('numero_remate'),
-            'basic_info': remate_data,
-            'detalle': {}
-        }
-        
-        try:
-            # Navegar al detalle
-            if not self.navigate_to_remate_detail(remate_data):
-                return None
-            
-            logger.info(f"🔍 Extrayendo detalles completos del remate {remate_data.get('numero_remate')}")
-            
-            # Extraer datos de cada tab
-            complete_details['detalle']['tab_remate'] = self.extract_tab_remate_data()
-            complete_details['detalle']['tab_inmuebles'] = self.extract_tab_inmuebles_data()
-            complete_details['detalle']['tab_cronograma'] = self.extract_tab_cronograma_data()
-            
-            # Agregar metadatos
-            complete_details['extraction_timestamp'] = datetime.now().isoformat()
-            complete_details['source_url'] = self.driver.current_url
-            
-            self.stats['remates_with_details'] += 1
-            logger.info(f"✅ Detalles completos extraídos para remate {remate_data.get('numero_remate')}")
-            
-            return complete_details
-            
-        except Exception as e:
-            logger.error(f"❌ Error extrayendo detalles completos: {e}")
-            self.stats['errors'] += 1
-            return None
-
+    
     def run_complete_extraction(self):
-        """Ejecutar extracción completa del sistema REMAJU"""
+        """Ejecutar extracción completa con estructura jerárquica"""
         try:
-            logger.info("🚀 Iniciando extracción completa de REMAJU...")
+            logger.info("🚀 Iniciando extracción completa REMAJU (estructura organizada)")
             
-            # Configurar driver
-            if not self.setup_driver():
-                return self.create_error_result("Error configurando driver")
+            # Setup inicial
+            if not self.setup():
+                return self.create_error_result("Error en configuración")
             
             # Navegar a página principal
             if not self.navigate_to_main_page():
                 return self.create_error_result("Error navegando a página principal")
             
-            # Extraer información del módulo principal
-            module_remates_data = {
-                'filtros_aplicados': self.extract_filters_applied(),
-                'formulario_filtros': self.extract_filter_form_elements(),
+            # 1. MÓDULO REMATES (Listado)
+            logger.info("📋 Extrayendo Módulo Remates...")
+            
+            modulo_remates_data = {
+                'filtros_aplicados': self.modulo_remates.extract_filtros_aplicados(),
+                'formulario_filtros': self.modulo_remates.extract_formulario_filtros(),
                 'resultados': []
             }
             
-            # Extraer listado de remates
-            remates_list = self.extract_remate_listings()
-            module_remates_data['resultados'] = remates_list
+            # Extraer resultados del listado
+            resultados = self.modulo_remates.extract_resultados()
+            modulo_remates_data['resultados'] = resultados
+            self.stats['total_remates'] = len(resultados)
             
-            # Determinar cuántos remates extraer en detalle
-            max_details = int(os.environ.get('MAX_DETAILS', '5'))  # Limitar por rendimiento
+            # 2. MÓDULO DETALLE (Para remates seleccionados)
+            logger.info("🔍 Extrayendo Módulo Detalle...")
             
-            if max_details > 0 and remates_list:
-                logger.info(f"🔍 Extrayendo detalles de {min(max_details, len(remates_list))} remates...")
-                
-                detailed_remates = []
-                
-                for i, remate in enumerate(remates_list[:max_details]):
-                    try:
-                        logger.info(f"🔍 Procesando detalle {i+1}/{min(max_details, len(remates_list))}: {remate.get('numero_remate')}")
-                        
-                        complete_details = self.extract_complete_remate_details(remate)
-                        if complete_details:
-                            detailed_remates.append(complete_details)
-                        
-                        # Regresar al listado principal después de cada detalle
-                        self.navigate_to_main_page()
-                        time.sleep(2)
-                        
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error procesando detalle {i}: {e}")
-                        self.stats['errors'] += 1
-                        continue
-            else:
-                detailed_remates = []
+            detailed_remates = []
+            max_details = min(MAX_DETAILS, len(resultados))
             
-            # Consolidar resultados finales
-            final_result = {
+            for i in range(max_details):
+                try:
+                    remate = resultados[i]
+                    logger.info(f"🔍 Procesando detalle {i+1}/{max_details}: Remate {remate.get('numero_remate')}")
+                    
+                    # Navegar al detalle
+                    if self.modulo_detalle.navigate_to_detail(i):
+                        # Extraer detalles completos
+                        detalle = self.modulo_detalle.extract_complete_details()
+                        
+                        complete_remate = {
+                            'numero_remate': remate.get('numero_remate'),
+                            'basic_info': remate,
+                            'detalle': detalle,
+                            'extraction_timestamp': datetime.now().isoformat(),
+                            'source_url': self.driver.current_url
+                        }
+                        
+                        detailed_remates.append(complete_remate)
+                        self.stats['remates_with_details'] += 1
+                        
+                        logger.info(f"✅ Detalle completo extraído para remate {remate.get('numero_remate')}")
+                    
+                    # Volver al listado
+                    self.modulo_detalle.return_to_listing()
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error procesando detalle {i}: {e}")
+                    self.stats['errors'] += 1
+                    continue
+            
+            # Resultado final
+            resultado_final = {
                 'status': 'success',
                 'timestamp': datetime.now().isoformat(),
                 'sistema': 'REMAJU',
-                'fuente': 'https://remaju.pj.gob.pe',
+                'fuente': MAIN_URL,
                 'estadisticas': self.generate_stats(),
-                'modulo_remates': module_remates_data,
+                'modulo_remates': modulo_remates_data,
                 'modulo_detalle_remates': detailed_remates
             }
             
-            logger.info(f"✅ Extracción completa finalizada exitosamente")
-            logger.info(f"📊 Estadísticas finales: {self.generate_stats()}")
-            
-            return final_result
+            logger.info("✅ Extracción completa finalizada exitosamente")
+            return resultado_final
             
         except Exception as e:
             logger.error(f"❌ Error en extracción completa: {e}")
-            return self.create_error_result(f"Error en extracción completa: {str(e)}")
+            return self.create_error_result(f"Error en extracción: {str(e)}")
         
         finally:
             if self.driver:
                 self.driver.quit()
-
+    
     def generate_stats(self):
         """Generar estadísticas de la ejecución"""
         end_time = datetime.now()
@@ -853,9 +800,9 @@ class REMAJUScraperAdvanced:
             'errores': self.stats['errors'],
             'tasa_exito_detalle': round((self.stats['remates_with_details'] / max(1, self.stats['total_remates'])) * 100, 2)
         }
-
+    
     def create_error_result(self, error_message):
-        """Crear resultado de error estandarizado"""
+        """Crear resultado de error"""
         return {
             'status': 'error',
             'timestamp': datetime.now().isoformat(),
@@ -865,47 +812,47 @@ class REMAJUScraperAdvanced:
             'modulo_detalle_remates': []
         }
 
+# ========================================
+# FUNCIÓN PRINCIPAL
+# ========================================
+
 def main():
-    """Función principal para ejecución"""
+    """Función principal"""
     try:
-        logger.info("🎯 Iniciando REMAJU Scraper Avanzado...")
-        
-        # Configuración desde variables de entorno
-        headless = os.environ.get('HEADLESS', 'true').lower() == 'true'
-        max_wait = int(os.environ.get('MAX_WAIT', '30'))
+        logger.info("🎯 Iniciando REMAJU Scraper Organizado...")
         
         # Crear y ejecutar scraper
-        scraper = REMAJUScraperAdvanced(headless=headless, max_wait=max_wait)
-        result = scraper.run_complete_extraction()
+        scraper = REMAJUScraperOrganizado()
+        resultado = scraper.run_complete_extraction()
         
         # Guardar resultados
         output_file = 'remates_result.json'
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+            json.dump(resultado, f, ensure_ascii=False, indent=2)
         
         logger.info(f"💾 Resultados guardados en: {output_file}")
         
-        # Imprimir resumen
-        if result['status'] == 'success':
-            stats = result['estadisticas']
-            logger.info(f"🎉 ÉXITO - {stats['total_remates_listado']} remates, {stats['remates_con_detalle']} con detalle")
+        # Mostrar resumen
+        if resultado['status'] == 'success':
+            stats = resultado['estadisticas']
+            logger.info("🎉 SCRAPING COMPLETADO EXITOSAMENTE")
+            logger.info(f"📊 Total remates: {stats['total_remates_listado']}")
+            logger.info(f"🔍 Con detalles: {stats['remates_con_detalle']}")
+            logger.info(f"⏱️ Duración: {stats['duracion_segundos']} segundos")
+            logger.info(f"📈 Tasa éxito: {stats['tasa_exito_detalle']}%")
         else:
-            logger.error(f"❌ ERROR - {result['error_message']}")
+            logger.error(f"❌ ERROR: {resultado['error_message']}")
         
-        return result
+        return resultado
         
     except Exception as e:
         logger.error(f"❌ Error en función principal: {e}")
-        return {
-            'status': 'error',
-            'timestamp': datetime.now().isoformat(),
-            'error_message': str(e)
-        }
+        return {'status': 'error', 'error_message': str(e)}
 
 if __name__ == "__main__":
     result = main()
     
-    # Salir con código de error si falló
+    # Códigos de salida para GitHub Actions
     if result.get('status') == 'error':
         sys.exit(1)
     else:
