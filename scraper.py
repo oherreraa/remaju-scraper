@@ -3,573 +3,621 @@ import time
 import logging
 import re
 import os
+import unicodedata
+import traceback
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    TimeoutException,
-    NoSuchElementException,
-    StaleElementReferenceException,
-    WebDriverException,
-)
+
 
 # =========================
 # CONFIG
 # =========================
-BASE_URL = "https://remaju.pj.gob.pe/remaju/"
-DEFAULT_TIMEOUT = 25
-SCROLL_PAUSE = 1.2
-MAX_SCROLLS_PER_PAGE = 12          # for infinite-scroll style loading
-MAX_REMATES_PER_RUN = None         # set int to limit, e.g. 20
+BASE_URL = "https://remaju.pj.gob.pe/remaju/pages/publico/remateExterno.xhtml"
+WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "30"))
+MAX_PAGES = int(os.getenv("MAX_PAGES", "50"))
 HEADLESS = os.getenv("HEADLESS", "1") != "0"
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 
-# Known label patterns for Detalle extraction (fallback regex)
-DETALLE_FIELDS = [
-    ("expediente", r"Expediente"),
-    ("distrito_judicial", r"Distrito Judicial"),
-    ("organo_jurisdiccional", r"(Órgano|Organo) Jurisdiccional"),
-    ("instancia", r"Instancia"),
-    ("juez", r"Juez"),
-    ("especialista", r"Especialista"),
-    ("materia", r"Materia"),
-    ("resolucion", r"Resoluci[oó]n"),
-    ("fecha_resolucion", r"Fecha Resoluci[oó]n"),
-    ("archivo_resolucion", r"Archivo"),
-    ("convocatoria", r"Convocatoria"),
-    ("tasacion", r"Tasaci[oó]n"),
-    ("precio_base", r"Precio Base"),
-    ("incremento_ofertas", r"Incremento de Ofertas"),
-    ("arancel", r"Arancel"),
-    ("oblaje", r"Oblaje"),
-]
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# =========================
-# LOGGING
-# =========================
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler("scrape_remaju.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
 )
-logger = logging.getLogger("remaju-scraper")
+log = logging.getLogger("remaju-scraper")
+
+
+# =========================
+# UTILS
+# =========================
+def ts() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def save_screenshot(driver, label: str) -> str:
+    path = os.path.join(OUTPUT_DIR, f"{label}_{ts()}.png")
+    try:
+        driver.save_screenshot(path)
+        log.info(f"Saved screenshot: {path}")
+    except Exception as e:
+        log.error(f"Could not save screenshot: {e}")
+    return path
+
+
+def dump_json(data: Any, label: str) -> str:
+    path = os.path.join(OUTPUT_DIR, f"{label}_{ts()}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        log.info(f"JSON saved: {path}")
+    except Exception as e:
+        log.error(f"Could not save JSON: {e}")
+    return path
+
+
+def norm(s: str) -> str:
+    """Normalize label text for matching."""
+    s = s.strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = re.sub(r"\s+", " ", s)
+    s = s.replace(":", "")
+    return s
+
+
+def safe_text(el) -> str:
+    try:
+        return el.text.strip()
+    except Exception:
+        return ""
+
+
+def parse_money(raw: str) -> Dict[str, Any]:
+    """
+    Parse a money string like:
+      "S/. 33,481.17" or "$ 140,952.00"
+    """
+    out = {"texto": raw, "moneda": None, "numerico": None}
+    if not raw:
+        return out
+
+    raw_clean = raw.strip()
+    if "S/." in raw_clean or "S/" in raw_clean:
+        out["moneda"] = "PEN"
+    elif "$" in raw_clean or "USD" in raw_clean:
+        out["moneda"] = "USD"
+
+    m = re.search(r"([0-9][0-9\.,]*)", raw_clean)
+    if m:
+        num_str = m.group(1).replace(",", "")
+        try:
+            out["numerico"] = float(num_str)
+        except ValueError:
+            out["numerico"] = None
+
+    return out
+
+
+def wait_doc_ready(driver, timeout=WAIT_TIMEOUT):
+    WebDriverWait(driver, timeout).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
 
 
 # =========================
 # DRIVER
 # =========================
 def build_driver() -> webdriver.Chrome:
-    opts = Options()
-    if HEADLESS:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--window-size=1440,1000")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-notifications")
-    opts.add_argument("--lang=es-PE")
-    # reduce bot-detection friction a bit
-    opts.add_argument("--disable-blink-features=AutomationControlled")
+    options = Options()
 
-    driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(60)
+    if HEADLESS:
+        options.add_argument("--headless=new")
+
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=es-ES")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # Allow custom chrome binary if GH runner path differs
+    chrome_bin = os.getenv("CHROME_BINARY")
+    if chrome_bin:
+        options.binary_location = chrome_bin
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(WAIT_TIMEOUT)
     return driver
 
 
-def wait_for_document_ready(driver: webdriver.Chrome, timeout: int = DEFAULT_TIMEOUT):
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") == "complete"
-    )
+# =========================
+# PAGE OPEN / SEARCH CLICK
+# =========================
+def open_base(driver):
+    log.info(f"Opening {BASE_URL}")
+    driver.get(BASE_URL)
+    wait_doc_ready(driver)
 
-
-def safe_screenshot(driver: webdriver.Chrome, name: str):
+    # If there is a cookie/consent dialog, attempt to accept
     try:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = f"debug_{name}_{ts}.png"
-        driver.save_screenshot(path)
-        logger.info(f"Saved screenshot: {path}")
+        consent_btns = driver.find_elements(
+            By.XPATH,
+            "//button[contains(.,'Aceptar') or contains(.,'aceptar') or contains(.,'OK')]"
+        )
+        if consent_btns:
+            driver.execute_script("arguments[0].click();", consent_btns[0])
+            time.sleep(1)
+    except Exception:
+        pass
+
+    # Click Buscar / Consultar if present (PrimeFaces often needs explicit query)
+    try:
+        buscar = driver.find_elements(
+            By.XPATH,
+            "//a[contains(.,'Buscar') or contains(.,'Consultar') or contains(.,'Filtrar')]"
+        )
+        if buscar:
+            log.info("Clicking Buscar/Consultar to load results...")
+            driver.execute_script("arguments[0].click();", buscar[0])
+            time.sleep(2)
+            wait_doc_ready(driver)
     except Exception as e:
-        logger.warning(f"Screenshot failed: {e}")
-
-
-def scroll_into_view(driver: webdriver.Chrome, element):
-    driver.execute_script(
-        "arguments[0].scrollIntoView({behavior:'instant', block:'center'});",
-        element
-    )
-    time.sleep(0.4)
+        log.warning(f"Buscar button not clicked (non-fatal): {e}")
 
 
 # =========================
-# LIST PAGE HELPERS
+# LIST DISCOVERY
 # =========================
-def locate_cards(driver: webdriver.Chrome) -> List[Any]:
-    """
-    Tries multiple container patterns because PJ may change DOM.
-    We search for blocks containing 'Remate N°' text.
-    """
-    xpath_candidates = [
-        "//mat-card[.//*[contains(.,'Remate N')]]",
-        "//div[contains(@class,'mat-card')][.//*[contains(.,'Remate N')]]",
-        "//div[contains(@class,'remate') and .//*[contains(.,'Remate N')]]",
-        "//div[.//*[contains(.,'Remate N')]]"
+def _candidate_cards(driver) -> List[Any]:
+    selectors = [
+        (By.CSS_SELECTOR, "div.ui-datascroller-item"),
+        (By.CSS_SELECTOR, "div[class*='remate']"),
+        (By.CSS_SELECTOR, "table[id*='tabla'] tbody tr"),
+        (By.XPATH, "//div[contains(.,'Remate N') and (contains(.,'CONVOCATORIA') or contains(.,'convocatoria'))]"),
     ]
-    for xp in xpath_candidates:
-        cards = driver.find_elements(By.XPATH, xp)
-        if cards:
-            return cards
-    return []
+
+    best: List[Any] = []
+    for by, sel in selectors:
+        try:
+            elems = driver.find_elements(by, sel)
+            filtered = []
+            for e in elems:
+                t = safe_text(e)
+                if "Remate N" in t and "CONVOCATORIA" in t.upper():
+                    filtered.append(e)
+            if len(filtered) > len(best):
+                best = filtered
+        except Exception:
+            continue
+    return best
 
 
-def load_all_cards(driver: webdriver.Chrome) -> List[Any]:
-    """
-    Handles infinite scroll: scroll down until no new cards appear.
-    """
-    last_count = 0
-    stable_rounds = 0
+def get_cards(driver) -> List[Any]:
+    cards = _candidate_cards(driver)
+    if not cards:
+        # fallback: sometimes content is in panels
+        try:
+            panels = driver.find_elements(By.CSS_SELECTOR, "div.ui-panel")
+            cards = [p for p in panels if "Remate N" in safe_text(p)]
+        except Exception:
+            cards = []
+    return cards
 
-    for i in range(MAX_SCROLLS_PER_PAGE):
-        cards = locate_cards(driver)
-        count = len(cards)
 
-        logger.info(f"Scroll round {i+1}: cards={count}")
-        if count == last_count:
-            stable_rounds += 1
-        else:
-            stable_rounds = 0
+# =========================
+# PARSING LIST CARD
+# =========================
+def parse_card_text(card_text: str) -> Dict[str, Any]:
+    data: Dict[str, Any] = {
+        "numero": "",
+        "numero_remate": "",
+        "tipo_convocatoria": "",
+        "precio_base": "",
+        "precio_base_numerico": None,
+        "precio_base_moneda": "",
+        "descripcion_corta": "",
+    }
 
-        if stable_rounds >= 2:
+    lines = [l.strip() for l in card_text.splitlines() if l.strip()]
+
+    # Numero remate
+    m = re.search(r"Remate\s*N[°º]?\s*(\d+)", card_text, re.IGNORECASE)
+    if m:
+        data["numero"] = m.group(1)
+
+    # Numero remate line
+    for l in lines:
+        if re.search(r"Remate\s*N[°º]", l, re.IGNORECASE):
+            data["numero_remate"] = l
             break
 
-        last_count = count
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(SCROLL_PAUSE)
-
-    return locate_cards(driver)
-
-
-def parse_card_text(card_text: str) -> Dict[str, Any]:
-    """
-    Parses the visible summary text from a Remate card.
-    """
-    data = {}
-
-    # remate number + convocatoria
-    m = re.search(r"Remate\s*N[°o]\s*(\d+)\s*-\s*(.*)", card_text, re.IGNORECASE)
-    if m:
-        data["numero"] = m.group(1).strip()
-        data["numero_remate"] = f"Remate N° {m.group(1).strip()} - {m.group(2).strip()}"
-        data["tipo_convocatoria"] = m.group(2).strip().split()[0] if m.group(2) else ""
+    # Tipo convocatoria
+    if "PRIMERA CONVOCATORIA" in card_text.upper():
+        data["tipo_convocatoria"] = "PRIMERA"
+    elif "SEGUNDA CONVOCATORIA" in card_text.upper():
+        data["tipo_convocatoria"] = "SEGUNDA"
     else:
-        m2 = re.search(r"Remate\s*N[°o]\s*(\d+)", card_text, re.IGNORECASE)
-        if m2:
-            data["numero"] = m2.group(1).strip()
-            data["numero_remate"] = f"Remate N° {m2.group(1).strip()}"
-        else:
-            data["numero"] = ""
-            data["numero_remate"] = ""
+        data["tipo_convocatoria"] = ""
 
-    # try to find base price on card
-    money = re.findall(r"(S\/\.\s*[\d,]+(?:\.\d{2})?|\$\s*[\d,]+(?:\.\d{2})?)", card_text)
-    if money:
-        data["precio_base"] = money[0].strip()
-        data["precio_base_moneda"] = "USD" if "$" in money[0] else "PEN"
-        try:
-            num = re.sub(r"[^\d.]", "", money[0].replace(",", ""))
-            data["precio_base_numerico"] = float(num) if num else None
-        except:
-            data["precio_base_numerico"] = None
-    else:
-        data["precio_base"] = ""
-        data["precio_base_moneda"] = ""
-        data["precio_base_numerico"] = None
+    # Precio base
+    price_line = ""
+    for l in lines:
+        if "precio" in l.lower() and ("base" in l.lower() or "postor" in l.lower()):
+            price_line = l
+            break
+    if not price_line:
+        # fallback first currency in card
+        m2 = re.search(r"(S\/\.|\$)\s*[0-9][0-9\.,]*", card_text)
+        price_line = m2.group(0) if m2 else ""
 
-    # status block on right
-    estado = ""
-    for line in card_text.splitlines():
-        if "En proceso" in line or "Publica" in line or "Inscrip" in line:
-            estado += (line.strip() + " ")
-    data["estado"] = estado.strip()
+    data["precio_base"] = price_line
+    money = parse_money(price_line)
+    data["precio_base_numerico"] = money["numerico"]
+    data["precio_base_moneda"] = money["moneda"] or ""
 
-    # preserve raw snippet for traceability
-    data["card_text"] = card_text.strip()
+    # Short description
+    if lines:
+        data["descripcion_corta"] = " | ".join(lines[:3])[:300]
+
     return data
 
 
-def click_button_in_card(card, label: str) -> bool:
+def click_detalle_in_card(driver, card) -> bool:
     """
-    Clicks a button/link inside a card by visible text.
+    Try to open detail view from list card.
+    Returns True if navigation happened.
     """
     try:
-        btn = card.find_element(By.XPATH, f".//button[contains(., '{label}')] | .//a[contains(., '{label}')]")
-        btn.click()
-        return True
-    except NoSuchElementException:
-        return False
-    except Exception:
-        return False
-
-
-# =========================
-# SEGUIMIENTO
-# =========================
-def scrape_seguimiento(driver: webdriver.Chrome, card) -> Dict[str, Any]:
-    """
-    Opens Seguimiento (modal or route) and captures text.
-    """
-    seguimiento = {"raw_text": "", "items": []}
-
-    if not click_button_in_card(card, "Seguimiento"):
-        return seguimiento
-
-    time.sleep(1.2)
-
-    # modal case (Angular Material dialog)
-    dialog_xpath = "//mat-dialog-container | //div[contains(@class,'cdk-overlay-pane')]//mat-dialog-container"
-    try:
-        dialog = WebDriverWait(driver, 8).until(
-            EC.presence_of_element_located((By.XPATH, dialog_xpath))
+        detalle_links = card.find_elements(
+            By.XPATH,
+            ".//a[contains(.,'Detalle') or contains(@title,'Detalle') or contains(@aria-label,'Detalle')]"
         )
-        raw = dialog.text.strip()
-        seguimiento["raw_text"] = raw
-
-        # parse timeline-ish lines into items
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
-        for l in lines:
-            # simplistic: date + event
-            md = re.search(r"(\d{2}/\d{2}/\d{4})\s*(.*)", l)
-            if md:
-                seguimiento["items"].append({
-                    "fecha": md.group(1),
-                    "evento": md.group(2).strip()
-                })
-
-        # close modal: ESC or close button
-        try:
-            driver.find_element(By.XPATH, "//button[contains(.,'Cerrar')]").click()
-        except Exception:
-            driver.switch_to.active_element.send_keys(Keys.ESCAPE)
-
-        time.sleep(0.8)
-        return seguimiento
-
-    except TimeoutException:
-        # route case: wait for a seguimiento title or block
-        try:
-            WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.XPATH, "//*[contains(.,'Seguimiento')]"))
-            )
-            raw = driver.find_element(By.TAG_NAME, "body").text.strip()
-            seguimiento["raw_text"] = raw
-        except Exception:
-            seguimiento["raw_text"] = driver.find_element(By.TAG_NAME, "body").text.strip()
-
-        # go back to list
-        safe_back(driver)
-        return seguimiento
-
-
-# =========================
-# DETALLE / INMUEBLES / CRONOGRAMA
-# =========================
-def safe_back(driver: webdriver.Chrome):
-    """
-    Go back to list with stability.
-    """
-    driver.back()
-    time.sleep(1.2)
-    wait_for_document_ready(driver, 15)
-
-
-def click_tab(driver: webdriver.Chrome, tab_label: str) -> bool:
-    """
-    Clicks a mat-tab by its visible label.
-    """
-    try:
-        tab = driver.find_element(By.XPATH, f"//div[@role='tab' and contains(., '{tab_label}')]")
-        tab.click()
-        time.sleep(0.8)
-        return True
-    except NoSuchElementException:
-        return False
-    except Exception:
-        return False
-
-
-def extract_from_table(driver: webdriver.Chrome) -> Dict[str, str]:
-    """
-    Attempts to read 2-column tables (label/value).
-    """
-    out = {}
-    try:
-        rows = driver.find_elements(By.XPATH, "//table//tr")
-        for r in rows:
-            cells = r.find_elements(By.XPATH, ".//th|.//td")
-            if len(cells) >= 2:
-                k = cells[0].text.strip().strip(":")
-                v = cells[1].text.strip()
-                if k and v:
-                    out[k] = v
+        if detalle_links:
+            old_url = driver.current_url
+            driver.execute_script("arguments[0].click();", detalle_links[0])
+            time.sleep(1.5)
+            wait_doc_ready(driver)
+            return driver.current_url != old_url
     except Exception:
         pass
-    return out
 
-
-def regex_extract_fields(page_text: str) -> Dict[str, str]:
-    """
-    Fallback: regex over full page text using known labels.
-    """
-    data = {}
-
-    # normalize spaces
-    txt = re.sub(r"[ \t]+", " ", page_text)
-    txt_lines = [l.strip() for l in page_text.splitlines() if l.strip()]
-
-    # map line-based "Label: Value"
-    line_map = {}
-    for l in txt_lines:
-        if ":" in l:
-            k, v = l.split(":", 1)
-            if k.strip() and v.strip():
-                line_map[k.strip()] = v.strip()
-
-    # use known DETALLE_FIELDS
-    for key, pat in DETALLE_FIELDS:
-        val = ""
-        # direct line map match
-        for lk, lv in line_map.items():
-            if re.fullmatch(pat, lk, re.IGNORECASE):
-                val = lv
-                break
-        if not val:
-            # same-line regex like "Expediente 1234-2023"
-            m = re.search(pat + r"\s*[:\-]?\s*(.+)", txt, re.IGNORECASE)
-            if m:
-                # cut at next known label if possible
-                val = m.group(1).strip()
-                # heuristic trimming
-                val = val.split(" Distrito Judicial")[0].split(" Órgano")[0].strip()
-        data[key] = val
-
-    return data
-
-
-def scrape_detalle(driver: webdriver.Chrome) -> Dict[str, Any]:
-    """
-    Scrapes Detalle tab + then Inmuebles and Cronograma tabs.
-    """
-    detalle_block = {}
-    body_text = driver.find_element(By.TAG_NAME, "body").text
-
-    # try structured 2-col table first
-    table_kv = extract_from_table(driver)
-
-    # fuse with regex fields
-    regex_kv = regex_extract_fields(body_text)
-
-    # map a few known label variants from table_kv into canonical keys
-    canon = {}
-    label_to_key = {
-        "Expediente": "expediente",
-        "Distrito Judicial": "distrito_judicial",
-        "Órgano Jurisdiccional": "organo_jurisdiccional",
-        "Organo Jurisdiccional": "organo_jurisdiccional",
-        "Instancia": "instancia",
-        "Juez": "juez",
-        "Especialista": "especialista",
-        "Materia": "materia",
-        "Resolución": "resolucion",
-        "Resolucion": "resolucion",
-        "Fecha Resolución": "fecha_resolucion",
-        "Fecha Resolucion": "fecha_resolucion",
-        "Archivo": "archivo_resolucion",
-        "Convocatoria": "convocatoria",
-        "Tasación": "tasacion",
-        "Tasacion": "tasacion",
-        "Precio Base": "precio_base",
-        "Incremento de Ofertas": "incremento_ofertas",
-        "Arancel": "arancel",
-        "Oblaje": "oblaje",
-    }
-    for k, v in table_kv.items():
-        if k in label_to_key:
-            canon[label_to_key[k]] = v
-
-    # merge canon over regex_kv
-    detalle_block.update(regex_kv)
-    detalle_block.update(canon)
-
-    # Inmuebles (tab is part of Detalle)
-    inmuebles = []
-    if click_tab(driver, "Inmuebles"):
-        inmuebles = scrape_generic_table(driver)
-
-    # Cronograma (tab is part of Detalle)
-    cronograma = []
-    if click_tab(driver, "Cronograma"):
-        cronograma = scrape_generic_table(driver)
-
-    return {
-        "detalle": detalle_block,
-        "inmuebles": inmuebles,
-        "cronograma": cronograma
-    }
-
-
-def scrape_generic_table(driver: webdriver.Chrome) -> List[Dict[str, str]]:
-    """
-    Scrapes visible table (mat-table or normal table).
-    Returns rows with header->cell mapping.
-    """
-    rows_data = []
+    # Fallback: click any link inside card that looks like navigation
     try:
-        table = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//table | //mat-table"))
-        )
-        # headers
-        headers = []
-        header_elems = table.find_elements(By.XPATH, ".//th | .//mat-header-cell")
-        for h in header_elems:
-            t = h.text.strip()
-            if t:
-                headers.append(t)
+        any_links = card.find_elements(By.XPATH, ".//a")
+        for a in any_links:
+            t = safe_text(a).upper()
+            if "DETALLE" in t or "VER" in t:
+                old_url = driver.current_url
+                driver.execute_script("arguments[0].click();", a)
+                time.sleep(1.5)
+                wait_doc_ready(driver)
+                return driver.current_url != old_url
+    except Exception:
+        pass
 
-        # rows
-        row_elems = table.find_elements(By.XPATH, ".//tr[td] | .//mat-row")
-        for r in row_elems:
-            cell_elems = r.find_elements(By.XPATH, ".//td | .//mat-cell")
-            cells = [c.text.strip() for c in cell_elems]
-            if not any(cells):
+    return False
+
+
+# =========================
+# DETAIL PARSING
+# =========================
+LABEL_MAP = {
+    "expediente": "expediente",
+    "distrito judicial": "distrito_judicial",
+    "organo jurisdiccional": "organo_jurisdiccional",
+    "instancia": "instancia",
+    "juez": "juez",
+    "especialista": "especialista",
+    "materia": "materia",
+    "resolucion": "resolucion",
+    "fecha resolucion": "fecha_resolucion",
+    "tasacion": "tasacion",
+    "precio base": "precio_base",
+    "incremento ofertas": "incremento_ofertas",
+    "tipo cambio": "tipo_cambio",
+    "arancel": "arancel",
+    "oblaje": "oblaje",
+    "convocatoria": "convocatoria",
+}
+
+
+def parse_label_value_tables(driver) -> Dict[str, str]:
+    pairs: Dict[str, str] = {}
+    rows = driver.find_elements(By.XPATH, "//table//tr[td and count(td)>=2]")
+    for r in rows:
+        tds = r.find_elements(By.XPATH, "./td")
+        if len(tds) < 2:
+            continue
+        label = norm(safe_text(tds[0]))
+        value = safe_text(tds[1])
+        if label and value and label not in pairs:
+            pairs[label] = value
+    return pairs
+
+
+def click_tab_if_exists(driver, tab_keywords: List[str]) -> bool:
+    """
+    Click a PrimeFaces tab by matching visible text.
+    """
+    for kw in tab_keywords:
+        try:
+            tabs = driver.find_elements(
+                By.XPATH,
+                f"//a[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÜÑ','abcdefghijklmnopqrstuvwxyzáéíóúüñ'), '{kw.lower()}')]"
+            )
+            if tabs:
+                driver.execute_script("arguments[0].click();", tabs[0])
+                time.sleep(1.2)
+                wait_doc_ready(driver)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def parse_table_as_dicts(driver) -> List[Dict[str, str]]:
+    tables = driver.find_elements(By.XPATH, "//table")
+    best_rows: List[Dict[str, str]] = []
+
+    for table in tables:
+        try:
+            headers = table.find_elements(By.XPATH, ".//th")
+            if not headers:
                 continue
-            if headers and len(headers) == len(cells):
-                rows_data.append({headers[i]: cells[i] for i in range(len(headers))})
-            else:
-                rows_data.append({f"col_{i+1}": cells[i] for i in range(len(cells))})
-    except TimeoutException:
-        pass
-    except Exception as e:
-        logger.warning(f"scrape_generic_table error: {e}")
+            header_txt = [norm(safe_text(h)) for h in headers]
+            body_rows = table.find_elements(By.XPATH, ".//tbody/tr")
+            if not body_rows:
+                continue
 
-    return rows_data
+            rows_out = []
+            for tr in body_rows:
+                tds = tr.find_elements(By.XPATH, "./td")
+                if not tds:
+                    continue
+                cells = [safe_text(td) for td in tds]
+                row_d = {}
+                for i, c in enumerate(cells):
+                    key = header_txt[i] if i < len(header_txt) else f"col_{i+1}"
+                    row_d[key] = c
+                # consider non-empty rows only
+                if any(v.strip() for v in row_d.values()):
+                    rows_out.append(row_d)
+
+            if len(rows_out) > len(best_rows):
+                best_rows = rows_out
+        except Exception:
+            continue
+
+    return best_rows
 
 
-def open_detalle_and_scrape(driver: webdriver.Chrome, card) -> Dict[str, Any]:
-    if not click_button_in_card(card, "Detalle"):
-        return {"detalle": {}, "inmuebles": [], "cronograma": []}
+def parse_detalle_page(driver) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """
+    Returns:
+      detalle_general, inmuebles_list, cronograma_list
+    """
+    detalle_general: Dict[str, Any] = {}
+    inmuebles: List[Dict[str, Any]] = []
+    cronograma: List[Dict[str, Any]] = []
 
-    # wait for Detalle view
+    # General label-value pairs
+    pairs = parse_label_value_tables(driver)
+    otros = {}
+    for lbl, val in pairs.items():
+        key = LABEL_MAP.get(lbl)
+        if key:
+            detalle_general[key] = val
+        else:
+            otros[lbl] = val
+    if otros:
+        detalle_general["otros_campos"] = otros
+
+    # Inmuebles tab/table
+    if click_tab_if_exists(driver, ["inmuebles", "bienes", "inmueble"]):
+        inmuebles = parse_table_as_dicts(driver)
+
+    # Cronograma tab/table
+    if click_tab_if_exists(driver, ["cronograma", "fechas"]):
+        cronograma = parse_table_as_dicts(driver)
+
+    return detalle_general, {"inmuebles": inmuebles}, {"cronograma": cronograma}
+
+
+def parse_seguimiento(driver) -> Dict[str, Any]:
+    """
+    Extract seguimiento module if exposed as a tab or panel.
+    """
+    seguimiento: Dict[str, Any] = {}
+
+    if click_tab_if_exists(driver, ["seguimiento"]):
+        pairs = parse_label_value_tables(driver)
+        for lbl, val in pairs.items():
+            seguimiento[lbl] = val
+        seguimiento["tab_visible"] = True
+    else:
+        seguimiento["tab_visible"] = False
+
+    return seguimiento
+
+
+def go_back_to_list(driver):
+    # Try to click "Regresar/Volver"
     try:
-        WebDriverWait(driver, 12).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//*[contains(.,'Detalle de expediente') or contains(.,'Detalle') or contains(.,'Expediente')]")
-            )
+        back_btns = driver.find_elements(
+            By.XPATH,
+            "//a[contains(.,'Regresar') or contains(.,'Volver') or contains(.,'Retornar') or contains(.,'Atrás')]"
         )
-    except TimeoutException:
-        # still proceed with whatever loaded
+        if back_btns:
+            driver.execute_script("arguments[0].click();", back_btns[0])
+            time.sleep(1.5)
+            wait_doc_ready(driver)
+            return
+    except Exception:
         pass
 
-    time.sleep(0.8)
-    data = scrape_detalle(driver)
+    # Fallback browser back
+    driver.back()
+    time.sleep(1.5)
+    wait_doc_ready(driver)
 
-    # return to list
-    safe_back(driver)
-    return data
+
+# =========================
+# PAGINATION
+# =========================
+def click_next_page(driver, current_first_text: str) -> bool:
+    """
+    Attempts to advance paginator / datascroller.
+    Returns True if page advanced.
+    """
+    candidates = []
+
+    # PrimeFaces paginator
+    candidates += driver.find_elements(By.CSS_SELECTOR, "a.ui-paginator-next")
+    # Text-based
+    candidates += driver.find_elements(
+        By.XPATH,
+        "//a[contains(.,'Siguiente') or contains(.,'Next') or contains(.,'›') or contains(.,'»') or contains(@aria-label,'Next')]"
+    )
+    # Datascroller "Cargar más"
+    candidates += driver.find_elements(
+        By.XPATH,
+        "//a[contains(.,'Cargar más') or contains(.,'Más resultados') or contains(.,'Ver más')]"
+    )
+
+    # Filter duplicates
+    uniq = []
+    seen = set()
+    for c in candidates:
+        key = safe_text(c) + (c.get_attribute("class") or "")
+        if key not in seen:
+            uniq.append(c)
+            seen.add(key)
+
+    for btn in uniq:
+        try:
+            cls = (btn.get_attribute("class") or "").lower()
+            if "disabled" in cls:
+                continue
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(2)
+            wait_doc_ready(driver)
+            new_cards = get_cards(driver)
+            if new_cards and safe_text(new_cards[0]) != current_first_text:
+                return True
+        except Exception:
+            continue
+
+    return False
 
 
 # =========================
 # MAIN SCRAPE
 # =========================
-def scrape_remaju() -> List[Dict[str, Any]]:
+def scrape() -> List[Dict[str, Any]]:
     driver = build_driver()
-    remates: List[Dict[str, Any]] = []
-    output_path = None
+    results: List[Dict[str, Any]] = []
+    seen_numbers = set()
 
     try:
-        logger.info(f"Opening {BASE_URL}")
-        driver.get(BASE_URL)
-        wait_for_document_ready(driver)
+        open_base(driver)
 
-        # wait for any remate cards to exist
-        WebDriverWait(driver, DEFAULT_TIMEOUT).until(
-            lambda d: len(locate_cards(d)) > 0
-        )
-
-        cards = load_all_cards(driver)
-        logger.info(f"Total cards detected: {len(cards)}")
-
-        n_cards = len(cards)
-        limit = MAX_REMATES_PER_RUN if MAX_REMATES_PER_RUN else n_cards
-
-        for idx in range(limit):
-            # refresh cards each loop to avoid stale elements after back()
-            cards = locate_cards(driver)
-            if idx >= len(cards):
+        for page_idx in range(MAX_PAGES):
+            cards = get_cards(driver)
+            if not cards:
+                log.warning("No cards found on current page.")
                 break
 
-            card = cards[idx]
-            scroll_into_view(driver, card)
+            first_txt = safe_text(cards[0])
 
-            text = card.text
-            base_data = parse_card_text(text)
-            base_data["row_index"] = idx
-            base_data["line_index"] = None  # kept for compatibility with your original output
+            log.info(f"Page {page_idx+1}: cards detected = {len(cards)}")
 
-            logger.info(f"[{idx+1}/{limit}] Remate {base_data.get('numero')}")
+            for card in cards:
+                card_text = safe_text(card)
+                card_data = parse_card_text(card_text)
 
-            # Seguimiento module
-            try:
-                base_data["seguimiento"] = scrape_seguimiento(driver, card)
-            except Exception as e:
-                logger.warning(f"Seguimiento failed idx={idx}: {e}")
-                base_data["seguimiento"] = {"raw_text": "", "items": []}
+                numero = card_data.get("numero") or ""
+                if numero and numero in seen_numbers:
+                    continue
 
-            # Detalle + Inmuebles + Cronograma
-            try:
-                detail_pack = open_detalle_and_scrape(driver, card)
-                # merge hierarchical blocks
-                base_data.update(detail_pack["detalle"])
-                base_data["inmuebles"] = detail_pack["inmuebles"]
-                base_data["cronograma"] = detail_pack["cronograma"]
-            except Exception as e:
-                logger.error(f"Detalle scraping failed idx={idx}: {e}")
-                safe_screenshot(driver, f"detalle_fail_{idx}")
-                # best-effort go back
+                # Navigate to detail
+                navigated = click_detalle_in_card(driver, card)
+
+                if not navigated:
+                    log.warning(f"Could not navigate to detalle for remate {numero or '[sin numero]'}")
+                    results.append({
+                        **card_data,
+                        "detalle": {"detalle_general": {}, "inmuebles": [], "cronograma": []},
+                        "seguimiento": {}
+                    })
+                    if numero:
+                        seen_numbers.add(numero)
+                    continue
+
+                # Detail page parse
                 try:
-                    safe_back(driver)
-                except Exception:
-                    pass
+                    detalle_general, inm, cro = parse_detalle_page(driver)
+                    seguimiento = parse_seguimiento(driver)
+                except Exception as e:
+                    log.error(f"Error parsing detail for remate {numero}: {e}")
+                    save_screenshot(driver, f"debug_detalle_{numero or 'sn'}")
+                    detalle_general, inm, cro, seguimiento = {}, {"inmuebles": []}, {"cronograma": []}, {}
 
-            remates.append(base_data)
+                # Build final object, preserving your new organization
+                remate_obj = {
+                    **card_data,
+                    "detalle": {
+                        "detalle_general": detalle_general,
+                        "inmuebles": inm.get("inmuebles", []),
+                        "cronograma": cro.get("cronograma", []),
+                    },
+                    "seguimiento": seguimiento,
+                }
+
+                results.append(remate_obj)
+                if numero:
+                    seen_numbers.add(numero)
+
+                # Return to list
+                go_back_to_list(driver)
+
+            # Next page
+            advanced = click_next_page(driver, first_txt)
+            if not advanced:
+                log.info("No next page detected; stopping.")
+                break
+
+        return results
 
     except Exception as e:
-        logger.error(f"Fatal scrape error: {e}")
-        safe_screenshot(driver, "fatal")
+        log.error(f"Fatal scrape error: {e}")
+        log.error(traceback.format_exc())
+        save_screenshot(driver, "debug_fatal")
+        raise
+
     finally:
-        # Always write what we have
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"remates_{ts}.json"
-        try:
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump({"remates": remates}, f, ensure_ascii=False, indent=2)
-            logger.info(f"JSON saved: {output_path}")
-        except Exception as e:
-            logger.error(f"Could not write JSON output: {e}")
         try:
             driver.quit()
         except Exception:
             pass
 
-    return remates
-
 
 if __name__ == "__main__":
-    data = scrape_remaju()
-    print(f"\nDone. Remates scraped: {len(data)}")
+    log.info("🚀 Iniciando scraping...")
+    try:
+        remates = scrape()
+        dump_json(remates, "remates")
+        log.info(f"Done. Remates scraped: {len(remates)}")
+    except Exception:
+        # Ensure at least an empty file exists for CI artifacts
+        dump_json([], "remates_empty")
+        log.error("Scraping failed.")
+        raise
+    log.info("✅ Scraping completado")
