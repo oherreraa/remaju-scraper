@@ -70,23 +70,22 @@ def extract_price_info(text):
     if not text:
         return "", 0.0, ""
     
-    # Patrones unificados de precio
+    # Patrones específicos para REMAJU
     patterns = [
-        (r'(S/\.|USD|\$)\s*([\d,]+\.?\d*)', 1, 2),  # Moneda + monto
-        (r'([\d,]+\.?\d*)\s*(SOLES|DOLARES)', 2, 1),  # Monto + moneda
-        (r'S/\.\s*([\d,]+\.?\d*)', None, 1),  # Solo S/.
-        (r'\$\s*([\d,]+\.?\d*)', None, 1)  # Solo $
+        (r'Precio\s+Base\s+(S/\.|\$)\s*([\d,]+\.?\d*)', 1, 2),  # "Precio Base S/. 123,456"
+        (r'(S/\.|\$)\s*([\d,]+\.?\d*)', 1, 2),  # "S/. 123,456" o "$ 123,456"
+        (r'([\d,]+\.?\d*)\s*(SOLES|DOLARES)', 2, 1),  # "123,456 SOLES"
     ]
     
     for pattern, currency_group, amount_group in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             # Determinar moneda
-            if currency_group:
-                currency_text = match.group(currency_group).upper()
-                currency = "USD" if currency_text in ["USD", "$", "DOLARES"] else "S/."
+            currency_text = match.group(currency_group)
+            if currency_text in ["$", "USD", "DOLARES"]:
+                currency = "USD"
             else:
-                currency = "USD" if pattern.startswith(r'\$') else "S/."
+                currency = "S/."
             
             # Extraer monto
             amount_str = match.group(amount_group).replace(',', '')
@@ -199,251 +198,232 @@ class REMAJUScraper:
         
         return form_elements
     
-    def extract_remate_cards_from_table(self):
-        """Extraer tarjetas de remates desde tabla - VERSIÓN MEJORADA"""
+    def extract_remate_cards_from_page(self):
+        """Extraer remates desde cards/tarjetas de REMAJU"""
         remates = []
         try:
-            # Esperar que la página cargue completamente
+            # Esperar carga completa
             time.sleep(5)
             
-            # Intentar múltiples selectores para encontrar la tabla de REMAJU
-            table_selectors = [
-                "//table[contains(@class, 'ui-datatable-table')]",  # Tabla PrimeFaces común en REMAJU
-                "//table[contains(@class, 'table')]", 
-                "//table[contains(@class, 'dataTable')]", 
-                "//table[.//th[contains(text(), 'Remate')]]",
-                "//table[.//th[contains(text(), 'N°')]]", 
-                "//table[.//th[contains(text(), 'Número')]]",
-                "//div[contains(@class, 'ui-datatable')]//table",
-                "//div[contains(@class, 'ui-datatable-scrollable-body')]//table",
-                "//table[@role='grid']",
-                "//table[.//td[contains(text(), 'REMATE')]]",
-                "//table"
+            # REMAJU usa cards, no tabla tradicional
+            # Buscar elementos que contengan "Remate N°"
+            card_selectors = [
+                "//*[contains(text(), 'Remate N°')]",  # Elementos con "Remate N°"
+                "//div[contains(., 'Remate N°')]",     # Divs que contengan "Remate N°"
+                "//*[contains(text(), 'PRIMERA CONVOCATORIA')]",  # Por convocatoria
+                "//*[contains(text(), 'SEGUNDA CONVOCATORIA')]"
             ]
             
-            table = None
-            for selector in table_selectors:
-                table = safe_find_element(self.driver, By.XPATH, selector, optional=True)
-                if table:
-                    logger.info(f"Tabla encontrada con selector: {selector}")
+            remate_elements = []
+            for selector in card_selectors:
+                elements = self.driver.find_elements(By.XPATH, selector)
+                remate_elements.extend(elements)
+                if elements:
+                    logger.info(f"Encontrados {len(elements)} elementos con selector: {selector}")
                     break
             
-            if not table:
-                logger.warning("No se encontró tabla. Iniciando búsqueda alternativa...")
-                
-                # Método 1: Buscar elementos que contengan texto "REMATE"
-                remate_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'REMATE') or contains(text(), 'Remate') or contains(text(), 'remate')]")
-                
-                if remate_elements:
-                    logger.info(f"Encontrados {len(remate_elements)} elementos con 'REMATE'")
+            if not remate_elements:
+                logger.warning("No se encontraron elementos de remate. Extrayendo de texto completo...")
+                return self.extract_from_full_text()
+            
+            # Procesar cada elemento encontrado
+            processed_numbers = set()  # Para evitar duplicados
+            
+            for i, element in enumerate(remate_elements[:20]):  # Máximo 20 para evitar duplicados
+                try:
+                    # Intentar obtener el contenedor del remate completo
+                    # Buscar el div padre que contenga toda la información
+                    parent_candidates = [
+                        element,
+                        element.find_element(By.XPATH, "./.."),           # Padre inmediato
+                        element.find_element(By.XPATH, "./../.."),        # Abuelo  
+                        element.find_element(By.XPATH, "./../../..")      # Bisabuelo
+                    ]
                     
-                    for i, element in enumerate(remate_elements[:10]):  # Máximo 10
+                    best_parent = None
+                    max_text_length = 0
+                    
+                    for candidate in parent_candidates:
                         try:
-                            # Obtener el elemento padre que probablemente contenga toda la información
-                            parent = element.find_element(By.XPATH, "./..")
-                            parent_text = safe_get_text(parent)
-                            
-                            # Buscar número de remate
-                            numero_match = re.search(r'(?:remate\s+n[°º]?\s*)?(\d+)', parent_text, re.IGNORECASE)
-                            if numero_match:
-                                numero_remate = numero_match.group(1)
-                                
-                                # Extraer datos adicionales
-                                precio_texto, precio_numerico, moneda = extract_price_info(parent_text)
-                                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', parent_text)
-                                hora_match = re.search(r'(\d{1,2}:\d{2})', parent_text)
-                                
-                                # Convocatoria
-                                if "PRIMERA" in parent_text.upper():
-                                    tipo_convocatoria, numero_convocatoria = "PRIMERA", "PRIMERA CONVOCATORIA"
-                                elif "SEGUNDA" in parent_text.upper():
-                                    tipo_convocatoria, numero_convocatoria = "SEGUNDA", "SEGUNDA CONVOCATORIA"
-                                else:
-                                    tipo_convocatoria, numero_convocatoria = "", ""
-                                
-                                remate_data = {
-                                    'numero_remate': numero_remate,
-                                    'tipo_convocatoria': tipo_convocatoria,
-                                    'numero_convocatoria': numero_convocatoria,
-                                    'titulo_card': f"Remate N° {numero_remate}" + (f" - {numero_convocatoria}" if numero_convocatoria else ""),
-                                    'thumbnail_url': "",
-                                    'no_disponible': True,
-                                    'tipo_remate': "Judicial",
-                                    'ubicacion_corta': "",
-                                    'fecha_presentacion_oferta': fecha_match.group(1) if fecha_match else "",
-                                    'hora_presentacion_oferta': hora_match.group(1) if hora_match else "",
-                                    'descripcion_corta': parent_text[:200],
-                                    'estado_fase': "Publicación e Inscripción",
-                                    'precio_base_texto': precio_texto,
-                                    'precio_base_numerico': precio_numerico,
-                                    'moneda': moneda,
-                                    'acciones': {'seguimiento': "", 'detalle': "disponible", 'aviso': ""},
-                                    'card_index': i + 1,
-                                    'pagina': 1,
-                                    'posicion_en_pagina': i + 1
-                                }
-                                
-                                remates.append(remate_data)
-                                
-                        except Exception as e:
-                            logger.warning(f"Error procesando elemento remate {i}: {e}")
+                            candidate_text = safe_get_text(candidate)
+                            if len(candidate_text) > max_text_length and "Precio Base" in candidate_text:
+                                best_parent = candidate
+                                max_text_length = len(candidate_text)
+                        except:
                             continue
-                
-                # Método 2: Buscar en texto completo si no se encontraron elementos específicos
-                if not remates:
-                    logger.info("Buscando patrones de remate en texto completo")
                     
-                    # Actualizar cache del texto completo
-                    self.body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
+                    if not best_parent:
+                        best_parent = element
                     
-                    # Buscar patrones de números de remate
-                    remate_patterns = re.findall(r'(?:remate\s+n[°º]?\s*)?(\d+)', self.body_text, re.IGNORECASE)
+                    card_text = safe_get_text(best_parent)
                     
-                    # Filtrar números que parecen realmente ser números de remate (4-5 dígitos)
-                    remate_numbers = [num for num in remate_patterns if len(num) >= 4 and len(num) <= 6]
-                    
-                    for i, numero in enumerate(remate_numbers[:10]):  # Máximo 10
-                        remate_data = {
-                            'numero_remate': numero,
-                            'tipo_convocatoria': "PRIMERA",
-                            'numero_convocatoria': "PRIMERA CONVOCATORIA",
-                            'titulo_card': f"Remate N° {numero}",
-                            'thumbnail_url': "",
-                            'no_disponible': True,
-                            'tipo_remate': "Judicial",
-                            'ubicacion_corta': "",
-                            'fecha_presentacion_oferta': "",
-                            'hora_presentacion_oferta': "",
-                            'descripcion_corta': f"Remate judicial número {numero} - Publicación e Inscripción",
-                            'estado_fase': "Publicación e Inscripción",
-                            'precio_base_texto': "",
-                            'precio_base_numerico': 0.0,
-                            'moneda': "S/.",
-                            'acciones': {'seguimiento': "", 'detalle': "disponible", 'aviso': ""},
-                            'card_index': i + 1,
-                            'pagina': 1,
-                            'posicion_en_pagina': i + 1
-                        }
-                        remates.append(remate_data)
-                
-                # Debug: Mostrar información de la página si no se encontró nada
-                if not remates:
-                    logger.warning("No se encontraron remates. Información de debug:")
-                    
-                    # Mostrar todas las tablas
-                    all_tables = self.driver.find_elements(By.TAG_NAME, "table")
-                    logger.info(f"Total de tablas en la página: {len(all_tables)}")
-                    
-                    for i, tbl in enumerate(all_tables[:3]):  # Primeras 3 tablas
-                        tbl_text = safe_get_text(tbl)[:200]  # Primeros 200 caracteres
-                        logger.info(f"Tabla {i+1} contenido: {tbl_text}")
-                    
-                    # Verificar si hay contenido de remates en la página
-                    if "remate" in self.body_text.lower():
-                        logger.info("Se detecta contenido de 'remate' en la página")
-                    else:
-                        logger.warning("No se detecta contenido de remates en la página")
-                        
-                    # Mostrar algunos divs principales
-                    main_divs = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'content') or contains(@class, 'main') or contains(@class, 'ui-')]")
-                    logger.info(f"Total de divs principales: {len(main_divs)}")
-                    
-            else:
-                # Si se encontró tabla, extraer normalmente
-                logger.info("Procesando tabla encontrada...")
-                rows = table.find_elements(By.XPATH, ".//tbody/tr | .//tr[position()>1] | .//tr[td]")
-                logger.info(f"Encontradas {len(rows)} filas en tabla")
-                
-                for i, row in enumerate(rows):
-                    try:
-                        cells = row.find_elements(By.XPATH, ".//td")
-                        if len(cells) < 2:  # Al menos 2 celdas
-                            continue
-                        
-                        row_text = safe_get_text(row)
-                        
-                        # Si la fila está vacía o solo tiene headers, continuar
-                        if not row_text or len(row_text) < 10:
-                            continue
-                        
-                        # Extraer número de remate
-                        numero_match = re.search(r'(?:remate\s+n[°º]?\s*)?(\d+)', row_text, re.IGNORECASE)
-                        numero_remate = numero_match.group(1) if numero_match else f"REMATE_{i+1}"
-                        
-                        # Convocatoria
-                        if "PRIMERA" in row_text.upper():
-                            tipo_convocatoria, numero_convocatoria = "PRIMERA", "PRIMERA CONVOCATORIA"
-                        elif "SEGUNDA" in row_text.upper():
-                            tipo_convocatoria, numero_convocatoria = "SEGUNDA", "SEGUNDA CONVOCATORIA"
-                        else:
-                            tipo_convocatoria, numero_convocatoria = "", ""
-                        
-                        # Extraer precio, fechas
-                        precio_texto, precio_numerico, moneda = extract_price_info(row_text)
-                        fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row_text)
-                        hora_match = re.search(r'(\d{1,2}:\d{2})', row_text)
-                        
-                        # Descripción
-                        words = row_text.split()
-                        descripcion = ""
-                        for j in range(len(words) - 5):
-                            phrase = ' '.join(words[j:j+6])
-                            if len(phrase) > 30 and not re.search(r'\d{1,2}/\d{4}|\d+[,.]?\d*', phrase):
-                                descripcion = phrase
-                                break
-                        
-                        remate_data = {
-                            'numero_remate': numero_remate,
-                            'tipo_convocatoria': tipo_convocatoria,
-                            'numero_convocatoria': numero_convocatoria,
-                            'titulo_card': f"Remate N° {numero_remate}" + (f" - {numero_convocatoria}" if numero_convocatoria else ""),
-                            'thumbnail_url': "",
-                            'no_disponible': True,
-                            'tipo_remate': "Judicial",
-                            'ubicacion_corta': "",
-                            'fecha_presentacion_oferta': fecha_match.group(1) if fecha_match else "",
-                            'hora_presentacion_oferta': hora_match.group(1) if hora_match else "",
-                            'descripcion_corta': descripcion[:200] if descripcion else row_text[:200],
-                            'estado_fase': "Publicación e Inscripción",
-                            'precio_base_texto': precio_texto,
-                            'precio_base_numerico': precio_numerico,
-                            'moneda': moneda,
-                            'acciones': {'seguimiento': "", 'detalle': "disponible", 'aviso': ""},
-                            'card_index': i + 1,
-                            'pagina': 1,
-                            'posicion_en_pagina': i + 1
-                        }
-                        
-                        remates.append(remate_data)
-                        
-                    except Exception as e:
-                        logger.warning(f"Error procesando fila {i}: {e}")
+                    # Extraer número de remate
+                    numero_match = re.search(r'Remate\s+N°\s*(\d+)', card_text, re.IGNORECASE)
+                    if not numero_match:
                         continue
+                    
+                    numero_remate = numero_match.group(1)
+                    
+                    # Evitar duplicados
+                    if numero_remate in processed_numbers:
+                        continue
+                    processed_numbers.add(numero_remate)
+                    
+                    # Extraer convocatoria
+                    if "PRIMERA CONVOCATORIA" in card_text.upper():
+                        tipo_convocatoria, numero_convocatoria = "PRIMERA", "PRIMERA CONVOCATORIA"
+                    elif "SEGUNDA CONVOCATORIA" in card_text.upper():
+                        tipo_convocatoria, numero_convocatoria = "SEGUNDA", "SEGUNDA CONVOCATORIA"
+                    else:
+                        tipo_convocatoria, numero_convocatoria = "", ""
+                    
+                    # Extraer tipo de remate
+                    tipo_remate = "Judicial"
+                    if "REMATE SIMPLE" in card_text:
+                        tipo_remate = "Remate Simple"
+                    
+                    # Extraer ubicación (buscar después del tipo de remate)
+                    ubicacion_match = re.search(r'REMATE\s+SIMPLE\s+([A-ZÁÉÍÓÚÑ\s]+)(?:\s+Presentación|$)', card_text, re.IGNORECASE)
+                    ubicacion_corta = ubicacion_match.group(1).strip() if ubicacion_match else ""
+                    
+                    # Extraer fechas y horas
+                    fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', card_text)
+                    hora_match = re.search(r'(\d{1,2}:\d{2})\s*(?:AM|PM)', card_text)
+                    
+                    # Extraer estado/fase
+                    estado_fase = "Publicación e Inscripción"
+                    if "Presentación de Ofertas" in card_text:
+                        estado_fase = "Presentación de Ofertas"
+                    elif "Validación" in card_text:
+                        estado_fase = "Validación"
+                    
+                    # Extraer precio
+                    precio_texto, precio_numerico, moneda = extract_price_info(card_text)
+                    
+                    # Extraer descripción (buscar texto largo sin fechas ni precios)
+                    lines = card_text.split('\n')
+                    descripcion = ""
+                    for line in lines:
+                        line = line.strip()
+                        if (len(line) > 50 and 
+                            not re.search(r'\d{1,2}/\d{4}|Precio|Remate|Seguimiento|Detalle', line) and
+                            line not in ["PRIMERA CONVOCATORIA", "SEGUNDA CONVOCATORIA", "REMATE SIMPLE"]):
+                            descripcion = line[:200]
+                            break
+                    
+                    remate_data = {
+                        'numero_remate': numero_remate,
+                        'tipo_convocatoria': tipo_convocatoria,
+                        'numero_convocatoria': numero_convocatoria,
+                        'titulo_card': f"Remate N° {numero_remate}" + (f" - {numero_convocatoria}" if numero_convocatoria else ""),
+                        'thumbnail_url': "",
+                        'no_disponible': False,
+                        'tipo_remate': tipo_remate,
+                        'ubicacion_corta': ubicacion_corta,
+                        'fecha_presentacion_oferta': fecha_match.group(1) if fecha_match else "",
+                        'hora_presentacion_oferta': hora_match.group(1) if hora_match else "",
+                        'descripcion_corta': descripcion,
+                        'estado_fase': estado_fase,
+                        'precio_base_texto': precio_texto,
+                        'precio_base_numerico': precio_numerico,
+                        'moneda': moneda,
+                        'acciones': {'seguimiento': "disponible", 'detalle': "disponible", 'aviso': "disponible"},
+                        'card_index': len(remates) + 1,
+                        'pagina': 1,
+                        'posicion_en_pagina': len(remates) + 1
+                    }
+                    
+                    remates.append(remate_data)
+                    logger.info(f"Extraído remate {numero_remate}: {ubicacion_corta}")
+                    
+                except Exception as e:
+                    logger.warning(f"Error procesando elemento remate {i}: {e}")
+                    continue
             
             self.stats['total_remates'] = len(remates)
-            logger.info(f"Extraídos {len(remates)} remates en total")
+            logger.info(f"Extraídos {len(remates)} remates desde cards")
             return remates
             
         except Exception as e:
-            logger.error(f"Error extrayendo remates: {e}")
+            logger.error(f"Error extrayendo remates desde cards: {e}")
+            return self.extract_from_full_text()
+    
+    def extract_from_full_text(self):
+        """Extraer remates desde texto completo como fallback"""
+        remates = []
+        try:
+            logger.info("Extrayendo remates desde texto completo")
+            
+            # Actualizar texto completo
+            self.body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
+            
+            # Buscar patrones de "Remate N° XXXXX"
+            remate_patterns = re.findall(r'Remate\s+N°\s*(\d+)', self.body_text, re.IGNORECASE)
+            
+            # Filtrar números únicos que parecen reales (4-6 dígitos)
+            unique_remates = []
+            for numero in remate_patterns:
+                if len(numero) >= 4 and len(numero) <= 6 and numero not in unique_remates:
+                    unique_remates.append(numero)
+            
+            logger.info(f"Encontrados {len(unique_remates)} números de remate únicos")
+            
+            for i, numero in enumerate(unique_remates[:10]):  # Máximo 10
+                # Buscar contexto alrededor de este número
+                context_pattern = rf'Remate\s+N°\s*{numero}.*?(?=Remate\s+N°|\Z)'
+                context_match = re.search(context_pattern, self.body_text, re.IGNORECASE | re.DOTALL)
+                
+                context = context_match.group(0) if context_match else f"Remate N° {numero}"
+                
+                # Extraer información básica del contexto
+                precio_texto, precio_numerico, moneda = extract_price_info(context)
+                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', context)
+                
+                # Convocatoria
+                if "PRIMERA" in context.upper():
+                    tipo_convocatoria, numero_convocatoria = "PRIMERA", "PRIMERA CONVOCATORIA"
+                elif "SEGUNDA" in context.upper():
+                    tipo_convocatoria, numero_convocatoria = "SEGUNDA", "SEGUNDA CONVOCATORIA"
+                else:
+                    tipo_convocatoria, numero_convocatoria = "", ""
+                
+                remate_data = {
+                    'numero_remate': numero,
+                    'tipo_convocatoria': tipo_convocatoria,
+                    'numero_convocatoria': numero_convocatoria,
+                    'titulo_card': f"Remate N° {numero}" + (f" - {numero_convocatoria}" if numero_convocatoria else ""),
+                    'thumbnail_url': "",
+                    'no_disponible': True,
+                    'tipo_remate': "Judicial",
+                    'ubicacion_corta': "",
+                    'fecha_presentacion_oferta': fecha_match.group(1) if fecha_match else "",
+                    'hora_presentacion_oferta': "",
+                    'descripcion_corta': f"Remate judicial número {numero}",
+                    'estado_fase': "Publicación e Inscripción",
+                    'precio_base_texto': precio_texto,
+                    'precio_base_numerico': precio_numerico,
+                    'moneda': moneda,
+                    'acciones': {'seguimiento': "", 'detalle': "disponible", 'aviso': ""},
+                    'card_index': i + 1,
+                    'pagina': 1,
+                    'posicion_en_pagina': i + 1
+                }
+                
+                remates.append(remate_data)
+            
+            logger.info(f"Extraídos {len(remates)} remates desde texto completo")
+            return remates
+            
+        except Exception as e:
+            logger.error(f"Error extrayendo desde texto completo: {e}")
             return []
     
     def navigate_to_detail(self, card_index):
         """Navegar al detalle de un remate"""
         try:
-            # Buscar botones de detalle con múltiples selectores
-            detail_selectors = [
-                "//button[contains(text(), 'Detalle')]",
-                "//input[@value='Detalle']", 
-                "//a[contains(text(), 'Detalle')]",
-                "//button[contains(@class, 'detalle')]",
-                "//a[contains(@href, 'detalle') or contains(@href, 'mostrar')]"
-            ]
-            
-            detail_buttons = []
-            for selector in detail_selectors:
-                buttons = self.driver.find_elements(By.XPATH, selector)
-                detail_buttons.extend(buttons)
+            # Buscar botones de detalle
+            detail_buttons = self.driver.find_elements(By.XPATH, 
+                "//button[contains(text(), 'Detalle')] | //input[@value='Detalle'] | //a[contains(text(), 'Detalle')]")
             
             if not detail_buttons or card_index >= len(detail_buttons):
                 logger.warning(f"No se encontró botón detalle para índice {card_index}")
@@ -483,7 +463,6 @@ class REMAJUScraper:
                 self.driver.back()
                 
             time.sleep(3)
-            WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
             
         except Exception as e:
             logger.warning(f"Error volviendo al listado: {e}")
@@ -684,11 +663,11 @@ class REMAJUScraper:
             if not self.setup() or not self.navigate_to_main_page():
                 return self.create_error_result("Error en configuración inicial")
             
-            # Extraer módulo principal
+            # Extraer módulo principal - USAR CARDS EN LUGAR DE TABLA
             modulo_remates = {
                 'filtros_aplicados': self.extract_filtros_aplicados(),
                 'formulario_filtros': self.extract_formulario_filtros(),
-                'resultados': self.extract_remate_cards_from_table()
+                'resultados': self.extract_remate_cards_from_page()  # ← CAMBIO PRINCIPAL
             }
             
             # Extraer detalles
