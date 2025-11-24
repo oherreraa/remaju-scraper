@@ -419,35 +419,158 @@ class REMAJUScraper:
             return []
     
     def navigate_to_detail(self, card_index):
-        """Navegar al detalle de un remate"""
+        """Navegar al detalle de un remate - VERSIÓN MEJORADA"""
         try:
-            # Buscar botones de detalle
-            detail_buttons = self.driver.find_elements(By.XPATH, 
-                "//button[contains(text(), 'Detalle')] | //input[@value='Detalle'] | //a[contains(text(), 'Detalle')]")
+            # Buscar botones de detalle con múltiples estrategias
+            detail_selectors = [
+                "//button[contains(text(), 'Detalle')]",
+                "//input[@value='Detalle']", 
+                "//a[contains(text(), 'Detalle')]",
+                "//button[contains(@onclick, 'detalle')]",
+                "//a[contains(@href, 'detalle')]",
+                "//a[contains(@href, 'mostrar')]",
+                "//*[@title='Detalle']",
+                "//button[contains(@class, 'detalle')]",
+                "//*[normalize-space(text())='Detalle']",
+                "//input[@type='submit' and contains(@value, 'Detalle')]"
+            ]
             
-            if not detail_buttons or card_index >= len(detail_buttons):
-                logger.warning(f"No se encontró botón detalle para índice {card_index}")
+            detail_buttons = []
+            for selector in detail_selectors:
+                try:
+                    buttons = self.driver.find_elements(By.XPATH, selector)
+                    if buttons:
+                        logger.info(f"Encontrados {len(buttons)} botones con selector: {selector}")
+                        detail_buttons.extend(buttons)
+                        break  # Usar el primer selector que encuentre botones
+                except:
+                    continue
+            
+            # Si no encuentra botones específicos, buscar en toda la página
+            if not detail_buttons:
+                logger.warning("No se encontraron botones con selectores específicos. Buscando en toda la página...")
+                
+                # Buscar todos los elementos que contengan la palabra "detalle"
+                all_elements = self.driver.find_elements(By.XPATH, "//*[contains(translate(text(), 'DETALLE', 'detalle'), 'detalle')]")
+                
+                for element in all_elements:
+                    try:
+                        # Verificar si es clickeable
+                        if element.is_displayed() and element.is_enabled():
+                            tag_name = element.tag_name.lower()
+                            if tag_name in ['button', 'a', 'input']:
+                                detail_buttons.append(element)
+                    except:
+                        continue
+                
+                logger.info(f"Encontrados {len(detail_buttons)} elementos clickeables con 'detalle'")
+            
+            # Si aún no encuentra, buscar por posición relativa a los remates
+            if not detail_buttons:
+                logger.warning("Intentando buscar botones por contexto de remate...")
+                
+                # Buscar elementos que contengan los números de remate que encontramos
+                remate_numbers = ["20872", "20871", "20869", "20868"]
+                
+                for numero in remate_numbers[:card_index + 1]:  # Hasta el índice actual
+                    try:
+                        # Buscar el elemento que contiene este número de remate
+                        remate_element = self.driver.find_element(By.XPATH, f"//*[contains(text(), '{numero}')]")
+                        
+                        # Buscar botones cerca de este elemento (hermanos, descendientes, etc.)
+                        nearby_selectors = [
+                            f"//*[contains(text(), '{numero}')]/following-sibling::*//*[contains(text(), 'Detalle')]",
+                            f"//*[contains(text(), '{numero}')]/following::*[contains(text(), 'Detalle')][1]",
+                            f"//*[contains(text(), '{numero}')]/parent::*//*[contains(text(), 'Detalle')]",
+                            f"//*[contains(text(), '{numero}')]/ancestor::*[1]//*[contains(text(), 'Detalle')]"
+                        ]
+                        
+                        for nearby_selector in nearby_selectors:
+                            nearby_buttons = self.driver.find_elements(By.XPATH, nearby_selector)
+                            if nearby_buttons:
+                                detail_buttons.extend(nearby_buttons)
+                                logger.info(f"Encontrados botones cerca del remate {numero}")
+                                break
+                        
+                        if detail_buttons:
+                            break
+                            
+                    except Exception as e:
+                        continue
+            
+            if not detail_buttons:
+                logger.error("No se pudo encontrar ningún botón de detalle con ningún método")
+                
+                # Debug: mostrar algunos elementos para entender la estructura
+                logger.info("Elementos disponibles para debug:")
+                all_buttons = self.driver.find_elements(By.XPATH, "//button | //a | //input[@type='submit']")
+                for i, btn in enumerate(all_buttons[:10]):  # Primeros 10
+                    try:
+                        btn_text = safe_get_text(btn)[:50]  # Primeros 50 caracteres
+                        if btn_text:
+                            logger.info(f"Botón {i}: {btn_text}")
+                    except:
+                        continue
+                
                 return False
+            
+            # Verificar que el índice sea válido
+            if card_index >= len(detail_buttons):
+                logger.warning(f"Índice {card_index} fuera de rango. Disponibles: {len(detail_buttons)}")
+                # Usar el último botón disponible
+                card_index = len(detail_buttons) - 1
             
             button = detail_buttons[card_index]
+            
+            # Verificar que el botón sea clickeable
             if not (button.is_displayed() and button.is_enabled()):
+                logger.warning(f"Botón no clickeable en índice {card_index}")
                 return False
             
-            self.driver.execute_script("arguments[0].scrollIntoView(); arguments[0].click();", button)
+            # Intentar click
+            try:
+                logger.info(f"Haciendo click en botón detalle índice {card_index}")
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                time.sleep(1)
+                self.driver.execute_script("arguments[0].click();", button)
+            except Exception as e:
+                logger.warning(f"Error con JavaScript click, intentando click normal: {e}")
+                button.click()
             
-            # Esperar carga de detalle
-            WebDriverWait(self.driver, 15).until(lambda d: any(
-                keyword in d.find_element(By.TAG_NAME, "body").text.lower() 
-                for keyword in ["expediente", "tasación", "partida", "distrito judicial", "precio base"]
-            ))
+            # Esperar carga de detalle con múltiples condiciones
+            def detail_page_loaded(driver):
+                try:
+                    body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+                    return any(keyword in body_text for keyword in [
+                        "expediente", "tasación", "partida", "distrito judicial", 
+                        "precio base", "convocatoria", "tipo de cambio",
+                        "cronograma", "inmuebles", "órgano jurisdiccional"
+                    ])
+                except:
+                    return False
             
-            # Actualizar cache del texto
-            self.body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
-            logger.info(f"Navegado al detalle (índice {card_index})")
-            return True
-            
+            try:
+                WebDriverWait(self.driver, 15).until(detail_page_loaded)
+                
+                # Actualizar cache del texto
+                self.body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
+                logger.info(f"✅ Navegado al detalle (índice {card_index}) exitosamente")
+                return True
+                
+            except TimeoutException:
+                logger.warning(f"Timeout esperando carga de página de detalle para índice {card_index}")
+                
+                # Verificar si al menos cambió la URL
+                current_url = self.driver.current_url
+                if "detalle" in current_url.lower() or "mostrar" in current_url.lower():
+                    logger.info("URL cambió a página de detalle, continuando...")
+                    self.body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
+                    return True
+                
+                return False
+                
         except Exception as e:
-            logger.warning(f"Error navegando al detalle: {e}")
+            logger.error(f"Error navegando al detalle: {e}")
             return False
     
     def return_to_listing(self):
