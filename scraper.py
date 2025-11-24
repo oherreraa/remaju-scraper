@@ -591,122 +591,87 @@ class REMAJUScraper:
             logger.warning(f"Error volviendo al listado: {e}")
     
     def extract_tab_remate_details(self):
-        """Extraer detalles del tab Remate - VERSIÓN CORREGIDA PARA ESTRUCTURA REAL"""
+        """Extraer detalles del tab Remate - EXTRACCIÓN DINÁMICA PURA"""
         try:
             # Asegurar que estamos en el tab Remate
             remate_tab = safe_find_element(self.driver, By.XPATH,
-                "//a[contains(text(), 'Remate')] | //button[contains(text(), 'Remate')] | //*[@title='Remate']",
-                optional=True)
+                "//a[contains(text(), 'Remate')] | //button[contains(text(), 'Remate')]", optional=True)
             if remate_tab and remate_tab.is_displayed():
                 self.driver.execute_script("arguments[0].click();", remate_tab)
-                time.sleep(2)
+                time.sleep(3)
             
-            # Actualizar texto después de cambiar tab
-            self.body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
-            
-            # Extraer usando selectores específicos para la estructura real de REMAJU
-            def extract_table_value(label_text):
-                """Extraer valor de tabla por etiqueta específica - VERSIÓN LIMPIA"""
+            # Función para extraer valor dinámico por label
+            def get_dynamic_value(label):
                 try:
-                    # Buscar en filas de tabla (td que contenga el label seguido por otro td con el valor)
-                    xpath_patterns = [
-                        f"//td[normalize-space(text())='{label_text}']/following-sibling::td[1]",
-                        f"//th[normalize-space(text())='{label_text}']/following-sibling::td[1]",
-                        f"//td[contains(normalize-space(text()), '{label_text}')]/following-sibling::td[1]",
-                        f"//tr[td[normalize-space(text())='{label_text}']]/td[2]",
-                        f"//tr[th[normalize-space(text())='{label_text}']]/td[1]"
+                    # Múltiples patrones para encontrar valor después de label
+                    patterns = [
+                        f"//td[normalize-space(text())='{label}']/following-sibling::td[1]",
+                        f"//th[normalize-space(text())='{label}']/following-sibling::td[1]",
+                        f"//tr[td[normalize-space(text())='{label}']]/td[2]",
+                        f"//label[normalize-space(text())='{label}']/following-sibling::*[1]"
                     ]
                     
-                    for pattern in xpath_patterns:
-                        elements = self.driver.find_elements(By.XPATH, pattern)
-                        for element in elements:
-                            value = safe_get_text(element).strip()
-                            # CRÍTICO: Limpiar el valor de cualquier label residual
-                            if value and value != label_text:
-                                # Remover el label si aparece al inicio del valor
-                                for label_variant in [label_text, label_text.upper(), label_text.lower()]:
-                                    if value.startswith(label_variant):
-                                        value = value[len(label_variant):].strip()
-                                
-                                # Validación adicional: valor debe ser sustancial
-                                if len(value) > 2 and not value.upper() in ['HEADER', 'LABEL']:
+                    for pattern in patterns:
+                        try:
+                            element = safe_find_element(self.driver, By.XPATH, pattern, optional=True)
+                            if element:
+                                value = safe_get_text(element).strip()
+                                if value and len(value) > 0:
                                     return value
-                    
-                    # Fallback: buscar en texto siguiente al label
-                    try:
-                        label_element = self.driver.find_element(By.XPATH, 
-                            f"//*[normalize-space(text())='{label_text}' or contains(normalize-space(text()), '{label_text}')]")
-                        parent = label_element.find_element(By.XPATH, "./..")
-                        parent_text = safe_get_text(parent)
-                        
-                        # Dividir por label y tomar lo que sigue
-                        if label_text in parent_text:
-                            parts = parent_text.split(label_text, 1)
-                            if len(parts) > 1:
-                                value = parts[1].strip()
-                                # Limpiar caracteres de separación comunes
-                                for sep in [':', '|', '-', '•']:
-                                    if value.startswith(sep):
-                                        value = value[1:].strip()
-                                if len(value) > 2:
-                                    return value
-                    except:
-                        pass
-                    
+                        except:
+                            continue
                     return ""
-                except Exception as e:
-                    logger.warning(f"Error extrayendo {label_text}: {e}")
+                except:
                     return ""
             
-            # Bloque expediente - usar estructura de tabla real
+            # Extraer bloque expediente - solo estructura, valores dinámicos
             expediente = {
-                'expediente': extract_table_value("Expediente"),
-                'distrito_judicial': extract_table_value("Distrito Judicial"),
-                'organo_jurisdiccional': extract_table_value("Órgano Jurisdisccional") or extract_table_value("Órgano Jurisdiccional"),
-                'instancia': extract_table_value("Instancia"),
-                'juez': extract_table_value("Juez"),
-                'especialista': extract_table_value("Especialista"),
-                'materia': extract_table_value("Materia"),
-                'resolucion': extract_table_value("Resolución"),
-                'fecha_resolucion': extract_table_value("Fecha Resolución"),
+                'expediente': get_dynamic_value("Expediente"),
+                'distrito_judicial': get_dynamic_value("Distrito Judicial"),
+                'organo_jurisdiccional': get_dynamic_value("Órgano Jurisdiccional") or get_dynamic_value("Órgano Jurisdisccional"),
+                'instancia': get_dynamic_value("Instancia"),
+                'juez': get_dynamic_value("Juez"),
+                'especialista': get_dynamic_value("Especialista"),
+                'materia': get_dynamic_value("Materia"),
+                'resolucion': get_dynamic_value("Resolución"),
+                'fecha_resolucion': get_dynamic_value("Fecha Resolución"),
                 'archivo_resolucion_url': ""
             }
             
-            # Buscar archivo de resolución
+            # Buscar archivo de resolución dinámicamente
             try:
-                archivo_link = safe_find_element(self.driver, By.XPATH, "//a[contains(@href, '.pdf') or contains(text(), 'resolución')]", optional=True)
-                if archivo_link:
-                    expediente['archivo_resolucion_url'] = archivo_link.get_attribute('href') or ""
+                archivo_element = safe_find_element(self.driver, By.XPATH, "//a[contains(@href, '.pdf')]", optional=True)
+                if archivo_element:
+                    expediente['archivo_resolucion_url'] = archivo_element.get_attribute('href') or ""
             except:
                 pass
             
-            # Bloque económico
+            # Extraer bloque económico - solo estructura, valores dinámicos
             economico = {
-                'convocatoria': extract_table_value("Convocatoria"),
-                'tipo_cambio': extract_table_value("Tipo Cambio") or extract_table_value("Tipo de Cambio"),
-                'tasacion': extract_table_value("Tasación"),
-                'precio_base': extract_table_value("Precio Base"),
-                'incremento_ofertas': extract_table_value("Incremento entre ofertas"),
-                'arancel': extract_table_value("Arancel"),
-                'oblaje': extract_table_value("Oblaje"),
-                'descripcion_completa': extract_table_value("Descripción")
+                'convocatoria': get_dynamic_value("Convocatoria"),
+                'tipo_cambio': get_dynamic_value("Tipo Cambio") or get_dynamic_value("Tipo de Cambio"),
+                'tasacion': get_dynamic_value("Tasación"),
+                'precio_base': get_dynamic_value("Precio Base"),
+                'incremento_ofertas': get_dynamic_value("Incremento entre ofertas"),
+                'arancel': get_dynamic_value("Arancel"),
+                'oblaje': get_dynamic_value("Oblaje"),
+                'descripcion_completa': get_dynamic_value("Descripción")
             }
             
-            # Indicadores
-            inscritos_value = extract_table_value("N° inscritos") or extract_table_value("inscritos")
+            # Extraer número de inscritos dinámicamente
+            inscritos_value = get_dynamic_value("N° inscritos") or get_dynamic_value("inscritos")
             num_inscritos = 0
             if inscritos_value:
-                inscritos_match = re.search(r'\d+', inscritos_value)
-                num_inscritos = int(inscritos_match.group()) if inscritos_match else 0
+                match = re.search(r'\d+', inscritos_value)
+                num_inscritos = int(match.group()) if match else 0
             
             indicadores = {
                 'num_inscritos': num_inscritos,
                 'regresar': True
             }
             
-            # Log de datos extraídos para debug
-            logger.info(f"Tab Remate extraído - Expediente: {expediente.get('expediente', 'N/A')}")
-            logger.info(f"Tab Remate extraído - Precio Base: {economico.get('precio_base', 'N/A')}")
+            logger.info(f"Tab Remate - Expediente: {expediente.get('expediente') or 'N/A'}")
+            logger.info(f"Tab Remate - Precio: {economico.get('precio_base') or 'N/A'}")
             
             return {
                 'bloque_expediente': expediente,
@@ -719,341 +684,260 @@ class REMAJUScraper:
             return {}
     
     def extract_tab_inmuebles_details(self):
-        """Extraer detalles del tab Inmuebles - CORRECCIÓN COMPLETA"""
+        """Extraer detalles del tab Inmuebles - EXTRACCIÓN DINÁMICA PURA"""
         try:
-            # PASO 1: Navegar específicamente al tab Inmuebles
+            # Navegar al tab Inmuebles
             logger.info("Navegando al tab Inmuebles...")
-            inmuebles_tab_clicked = False
-            
-            # Intentar múltiples selectores para el tab
-            tab_selectors = [
-                "//a[normalize-space(text())='Inmuebles']",
-                "//button[normalize-space(text())='Inmuebles']",
-                "//li[contains(@class, 'tab')]/a[contains(text(), 'Inmuebles')]",
-                "//*[@role='tab' and contains(text(), 'Inmuebles')]",
-                "//a[contains(@href, 'inmuebles') or contains(text(), 'Inmuebles')]"
-            ]
-            
-            for selector in tab_selectors:
-                try:
-                    tab_element = safe_find_element(self.driver, By.XPATH, selector, optional=True)
-                    if tab_element and tab_element.is_displayed():
-                        self.driver.execute_script("arguments[0].click();", tab_element)
-                        time.sleep(4)  # Esperar carga del tab
-                        inmuebles_tab_clicked = True
-                        logger.info(f"Tab Inmuebles activado con selector: {selector}")
-                        break
-                except Exception as e:
-                    logger.warning(f"Error con selector {selector}: {e}")
-                    continue
-            
-            if not inmuebles_tab_clicked:
-                logger.warning("No se pudo activar el tab Inmuebles")
-                return []
-            
-            # PASO 2: Verificar que estamos en el tab correcto
-            time.sleep(2)
-            current_content = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
-            
-            # Verificar presencia de contenido de inmuebles
-            if not any(keyword in current_content.upper() for keyword in ['PARTIDA', 'INMUEBLE', 'DIRECCIÓN', 'TIPO', 'CARGA']):
-                logger.warning("No se detecta contenido de inmuebles después de hacer clic en tab")
-                return []
+            inmuebles_tab = safe_find_element(self.driver, By.XPATH,
+                "//a[contains(text(), 'Inmuebles')] | //button[contains(text(), 'Inmuebles')]", optional=True)
+            if inmuebles_tab and inmuebles_tab.is_displayed():
+                self.driver.execute_script("arguments[0].click();", inmuebles_tab)
+                time.sleep(3)
+                logger.info("Tab Inmuebles activado")
             
             inmuebles = []
             
-            # PASO 3: Extraer datos de inmuebles usando múltiples estrategias
-            
-            # Estrategia 1: Buscar tabla específica de inmuebles
-            table_found = False
-            table_selectors = [
-                "//table[.//th[contains(text(), 'PARTIDA')] and .//th[contains(text(), 'TIPO')] and .//th[contains(text(), 'DIRECCIÓN')]]",
-                "//div[contains(@class, 'inmuebles')]//table",
-                "//table[contains(@class, 'table') and .//td[contains(text(), 'CASA') or contains(text(), 'DEPARTAMENTO')]]"
-            ]
-            
-            for table_selector in table_selectors:
-                try:
-                    table = safe_find_element(self.driver, By.XPATH, table_selector, optional=True)
+            try:
+                # Buscar tabla de inmuebles dinámicamente
+                table_selectors = [
+                    "//table[.//th[contains(text(), 'PARTIDA')] or .//th[contains(text(), 'Partida')]]",
+                    "//table[.//th[contains(text(), 'TIPO')] or .//th[contains(text(), 'Tipo')]]", 
+                    "//table[.//th[contains(text(), 'DIRECCIÓN')] or .//th[contains(text(), 'Dirección')]]",
+                    "//table[.//td[string-length(normalize-space(text())) > 5]]"  # Tabla con celdas sustanciales
+                ]
+                
+                table = None
+                for selector in table_selectors:
+                    table = safe_find_element(self.driver, By.XPATH, selector, optional=True)
                     if table:
-                        logger.info(f"Tabla de inmuebles encontrada: {table_selector}")
-                        
-                        # Extraer filas de datos
-                        rows = table.find_elements(By.XPATH, ".//tbody/tr[td] | .//tr[td and not(th)]")
-                        
-                        for i, row in enumerate(rows):
-                            try:
-                                cells = row.find_elements(By.XPATH, ".//td")
-                                if len(cells) >= 4:
-                                    
-                                    # Extraer valores LIMPIOS (sin labels)
-                                    partida_raw = safe_get_text(cells[0]).strip()
-                                    tipo_raw = safe_get_text(cells[1]).strip()
-                                    direccion_raw = safe_get_text(cells[2]).strip()
-                                    cargas_raw = safe_get_text(cells[3]).strip()
-                                    porcentaje_raw = safe_get_text(cells[4]).strip() if len(cells) > 4 else "100%"
-                                    
-                                    # LIMPIAR labels residuales
-                                    partida = partida_raw.replace("Partida Registral", "").replace("PARTIDA REGISTRAL", "").strip()
-                                    tipo = tipo_raw.replace("Tipo Inmueble", "").replace("TIPO INMUEBLE", "").strip()
-                                    direccion = direccion_raw.replace("Dirección", "").replace("DIRECCIÓN", "").strip()
-                                    cargas = cargas_raw.replace("Carga y/o Gravamen", "").replace("CARGA Y/O GRAVAMEN", "").strip()
-                                    
-                                    # Validar que son valores reales, no headers
-                                    if (partida and len(partida) > 3 and 
-                                        not partida.upper() in ['PARTIDA', 'TIPO', 'DIRECCIÓN', 'HEADER'] and
-                                        partida.isdigit() or len(partida) > 5):
-                                        
-                                        # Extraer porcentaje
-                                        porcentaje = 100.0
-                                        porcentaje_match = re.search(r'(\d+(?:\.\d+)?)%?', porcentaje_raw)
-                                        if porcentaje_match:
-                                            porcentaje = float(porcentaje_match.group(1))
-                                        
-                                        inmueble = {
-                                            'partida_registral': partida,
-                                            'tipo_inmueble': tipo,
-                                            'direccion': direccion,
-                                            'cargas_gravamenes': cargas,
-                                            'porcentaje_a_rematar': porcentaje,
-                                            'imagenes_refs': {'count': 0, 'urls': []},
-                                            'orden': len(inmuebles) + 1
-                                        }
-                                        
-                                        inmuebles.append(inmueble)
-                                        table_found = True
-                                        logger.info(f"Inmueble extraído: Partida {partida}")
-                                
-                            except Exception as e:
-                                logger.warning(f"Error procesando fila inmueble {i}: {e}")
-                                continue
-                        
-                        if table_found:
-                            break
-                            
-                except Exception as e:
-                    logger.warning(f"Error con tabla selector {table_selector}: {e}")
-                    continue
-            
-            # Estrategia 2: Si no encuentra tabla, buscar campos individuales
-            if not inmuebles:
-                logger.info("Tabla no encontrada, buscando campos individuales...")
+                        logger.info(f"Tabla inmuebles encontrada: {selector}")
+                        break
                 
-                # Función para buscar valor limpio por label exacto
-                def get_clean_value(label_text):
-                    patterns = [
-                        f"//td[normalize-space(text())='{label_text}']/following-sibling::td[1]",
-                        f"//th[normalize-space(text())='{label_text}']/following-sibling::td[1]",
-                        f"//label[normalize-space(text())='{label_text}']/following-sibling::*[1]"
-                    ]
+                if table:
+                    # Extraer filas de datos dinámicamente
+                    data_rows = table.find_elements(By.XPATH, ".//tbody/tr[td] | .//tr[td and not(th)]")
                     
-                    for pattern in patterns:
+                    for i, row in enumerate(data_rows):
                         try:
-                            elements = self.driver.find_elements(By.XPATH, pattern)
-                            for element in elements:
-                                value = safe_get_text(element).strip()
-                                if value and len(value) > 3:
-                                    # Limpiar cualquier residuo del label
-                                    clean_value = value.replace(label_text, "").strip()
-                                    if clean_value and clean_value != value:  # Si se removió algo
-                                        return clean_value
-                                    elif len(value) > 10:  # Valor largo probablemente correcto
-                                        return value
-                        except:
+                            cells = row.find_elements(By.XPATH, ".//td")
+                            if len(cells) < 3:
+                                continue
+                            
+                            # Extraer valores de celdas dinámicamente
+                            cell_values = []
+                            for cell in cells:
+                                cell_text = safe_get_text(cell).strip()
+                                if cell_text:
+                                    cell_values.append(cell_text)
+                            
+                            # Validar que no son headers
+                            first_value = cell_values[0] if cell_values else ""
+                            if (first_value and 
+                                first_value.upper() not in ['PARTIDA', 'TIPO', 'DIRECCIÓN', 'CARGA', 'PORCENTAJE', 'IMÁGENES'] and
+                                len(first_value) > 2):
+                                
+                                # Mapear valores a campos (orden típico de tabla de inmuebles)
+                                partida = cell_values[0] if len(cell_values) > 0 else ""
+                                tipo = cell_values[1] if len(cell_values) > 1 else ""
+                                direccion = cell_values[2] if len(cell_values) > 2 else ""
+                                cargas = cell_values[3] if len(cell_values) > 3 else ""
+                                porcentaje_text = cell_values[4] if len(cell_values) > 4 else "100"
+                                
+                                # Extraer porcentaje dinámicamente
+                                porcentaje = 100.0
+                                porcentaje_match = re.search(r'(\d+(?:\.\d+)?)', porcentaje_text)
+                                if porcentaje_match:
+                                    porcentaje = float(porcentaje_match.group(1))
+                                
+                                inmueble = {
+                                    'partida_registral': partida,
+                                    'tipo_inmueble': tipo,
+                                    'direccion': direccion,
+                                    'cargas_gravamenes': cargas,
+                                    'porcentaje_a_rematar': porcentaje,
+                                    'imagenes_refs': {'count': 0, 'urls': []},
+                                    'orden': len(inmuebles) + 1
+                                }
+                                
+                                inmuebles.append(inmueble)
+                                logger.info(f"Inmueble {len(inmuebles)} extraído dinámicamente")
+                                
+                        except Exception as e:
+                            logger.warning(f"Error procesando fila {i}: {e}")
                             continue
-                    return ""
                 
-                # Buscar campos específicos
-                partida = get_clean_value("Partida Registral") or get_clean_value("PARTIDA REGISTRAL")
-                tipo = get_clean_value("Tipo Inmueble") or get_clean_value("TIPO INMUEBLE") 
-                direccion = get_clean_value("Dirección") or get_clean_value("DIRECCIÓN")
-                cargas = get_clean_value("Carga y/o Gravamen") or get_clean_value("CARGA Y/O GRAVAMEN")
+                # Método alternativo: buscar por labels dinámicamente
+                if not inmuebles:
+                    logger.info("Tabla no encontrada, buscando por labels...")
+                    
+                    def find_value_by_label(label_variants):
+                        for label in label_variants:
+                            try:
+                                patterns = [
+                                    f"//td[normalize-space(text())='{label}']/following-sibling::td[1]",
+                                    f"//th[normalize-space(text())='{label}']/following-sibling::td[1]"
+                                ]
+                                for pattern in patterns:
+                                    element = safe_find_element(self.driver, By.XPATH, pattern, optional=True)
+                                    if element:
+                                        value = safe_get_text(element).strip()
+                                        if value and len(value) > 2:
+                                            return value
+                            except:
+                                continue
+                        return ""
+                    
+                    # Buscar campos dinámicamente
+                    partida = find_value_by_label(["Partida Registral", "PARTIDA REGISTRAL", "Partida"])
+                    tipo = find_value_by_label(["Tipo Inmueble", "TIPO INMUEBLE", "Tipo"])
+                    direccion = find_value_by_label(["Dirección", "DIRECCIÓN", "Direccion", "Ubicación"])
+                    cargas = find_value_by_label(["Carga y/o Gravamen", "CARGA Y/O GRAVAMEN", "Cargas", "Gravamen"])
+                    
+                    if partida or direccion:
+                        inmueble = {
+                            'partida_registral': partida,
+                            'tipo_inmueble': tipo,
+                            'direccion': direccion,
+                            'cargas_gravamenes': cargas,
+                            'porcentaje_a_rematar': 100.0,
+                            'imagenes_refs': {'count': 0, 'urls': []},
+                            'orden': 1
+                        }
+                        inmuebles.append(inmueble)
+                        logger.info("Inmueble extraído por labels")
                 
-                if partida or direccion:
-                    inmueble = {
-                        'partida_registral': partida,
-                        'tipo_inmueble': tipo,
-                        'direccion': direccion,
-                        'cargas_gravamenes': cargas,
-                        'porcentaje_a_rematar': 100.0,
-                        'imagenes_refs': {'count': 0, 'urls': []},
-                        'orden': 1
-                    }
-                    inmuebles.append(inmueble)
-                    logger.info(f"Inmueble extraído por campos: Partida {partida}")
-            
-            logger.info(f"Tab Inmuebles: {len(inmuebles)} inmuebles extraídos correctamente")
-            return inmuebles
+                logger.info(f"Tab Inmuebles: {len(inmuebles)} extraídos")
+                return inmuebles
+                
+            except Exception as e:
+                logger.error(f"Error extrayendo inmuebles: {e}")
+                return []
             
         except Exception as e:
-            logger.error(f"Error en tab Inmuebles: {e}")
+            logger.warning(f"Error en tab Inmuebles: {e}")
             return []
     
     def extract_tab_cronograma_details(self):
-        """Extraer detalles del tab Cronograma - CORRECCIÓN COMPLETA"""
+        """Extraer detalles del tab Cronograma - EXTRACCIÓN DINÁMICA PURA"""
         try:
-            # PASO 1: Navegar específicamente al tab Cronograma
+            # Navegar al tab Cronograma
             logger.info("Navegando al tab Cronograma...")
-            cronograma_tab_clicked = False
-            
-            # Intentar múltiples selectores para el tab cronograma
-            tab_selectors = [
-                "//a[normalize-space(text())='Cronograma']",
-                "//button[normalize-space(text())='Cronograma']",
-                "//li[contains(@class, 'tab')]/a[contains(text(), 'Cronograma')]",
-                "//*[@role='tab' and contains(text(), 'Cronograma')]",
-                "//a[contains(@href, 'cronograma') or contains(text(), 'Cronograma')]"
-            ]
-            
-            for selector in tab_selectors:
-                try:
-                    tab_element = safe_find_element(self.driver, By.XPATH, selector, optional=True)
-                    if tab_element and tab_element.is_displayed():
-                        self.driver.execute_script("arguments[0].click();", tab_element)
-                        time.sleep(4)  # Esperar carga del tab
-                        cronograma_tab_clicked = True
-                        logger.info(f"Tab Cronograma activado con selector: {selector}")
-                        break
-                except Exception as e:
-                    logger.warning(f"Error con selector {selector}: {e}")
-                    continue
-            
-            if not cronograma_tab_clicked:
-                logger.warning("No se pudo activar el tab Cronograma")
-                return []
-            
-            # PASO 2: Verificar que estamos en el tab correcto
-            time.sleep(3)
-            current_content = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
-            
-            # Verificar presencia de contenido de cronograma (NO de inmuebles)
-            cronograma_keywords = ['FASE', 'FECHA INICIO', 'FECHA FIN', 'PUBLICACIÓN', 'INSCRIPCIÓN', 'PRESENTACIÓN', 'CRONOGRAMA']
-            inmuebles_keywords = ['PARTIDA', 'TIPO INMUEBLE', 'DIRECCIÓN', 'CARGA', 'GRAVAMEN']
-            
-            has_cronograma_content = any(keyword in current_content.upper() for keyword in cronograma_keywords)
-            has_inmuebles_content = any(keyword in current_content.upper() for keyword in inmuebles_keywords)
-            
-            if not has_cronograma_content:
-                logger.warning("No se detecta contenido de cronograma después de hacer clic en tab")
-                return []
-                
-            if has_inmuebles_content and not has_cronograma_content:
-                logger.warning("Detecta contenido de inmuebles en lugar de cronograma")
-                return []
+            cronograma_tab = safe_find_element(self.driver, By.XPATH,
+                "//a[contains(text(), 'Cronograma')] | //button[contains(text(), 'Cronograma')]", optional=True)
+            if cronograma_tab and cronograma_tab.is_displayed():
+                self.driver.execute_script("arguments[0].click();", cronograma_tab)
+                time.sleep(3)
+                logger.info("Tab Cronograma activado")
             
             eventos = []
             
-            # PASO 3: Extraer eventos del cronograma usando múltiples estrategias
-            
-            # Estrategia 1: Buscar tabla específica de cronograma
-            table_found = False
-            table_selectors = [
-                "//table[.//th[contains(text(), 'FASE')] and .//th[contains(text(), 'FECHA')]]",
-                "//table[.//th[contains(text(), 'N°')] and .//th[contains(text(), 'FASE')] and .//th[contains(text(), 'INICIO')]]",
-                "//div[contains(@class, 'cronograma')]//table",
-                "//table[contains(@class, 'table') and .//td[contains(text(), 'Publicación') or contains(text(), 'Presentación')]]"
-            ]
-            
-            for table_selector in table_selectors:
-                try:
-                    table = safe_find_element(self.driver, By.XPATH, table_selector, optional=True)
-                    if table:
-                        logger.info(f"Tabla de cronograma encontrada: {table_selector}")
-                        
-                        # Extraer filas de datos (excluyendo headers)
-                        rows = table.find_elements(By.XPATH, ".//tbody/tr[td] | .//tr[td and not(th)]")
-                        
-                        for i, row in enumerate(rows):
-                            try:
-                                cells = row.find_elements(By.XPATH, ".//td")
-                                if len(cells) >= 3:
-                                    
-                                    # Mapear columnas según estructura de cronograma
-                                    numero_fase = safe_get_text(cells[0]).strip() if len(cells) > 0 else ""
-                                    fase_nombre = safe_get_text(cells[1]).strip() if len(cells) > 1 else ""
-                                    fecha_inicio = safe_get_text(cells[2]).strip() if len(cells) > 2 else ""
-                                    fecha_fin = safe_get_text(cells[3]).strip() if len(cells) > 3 else ""
-                                    
-                                    # Validar que es realmente un evento (no header ni datos de inmuebles)
-                                    if (fase_nombre and 
-                                        fase_nombre.upper() not in ['FASE', 'N°', 'HEADER', 'TIPO', 'PARTIDA', 'DIRECCIÓN'] and 
-                                        len(fase_nombre) > 5 and
-                                        not any(word in fase_nombre.upper() for word in ['INMUEBLE', 'CASA', 'DEPARTAMENTO', 'PARTIDA']) and
-                                        any(word in fase_nombre.upper() for word in ['PUBLICACIÓN', 'INSCRIPCIÓN', 'PRESENTACIÓN', 'VALIDACIÓN', 'PAGO'])):
-                                        
-                                        # Extraer fecha y hora de inicio limpias
-                                        fecha_clean = ""
-                                        hora_clean = ""
-                                        
-                                        if fecha_inicio:
-                                            fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', fecha_inicio)
-                                            hora_match = re.search(r'(\d{1,2}:\d{2})', fecha_inicio)
-                                            
-                                            if fecha_match:
-                                                fecha_clean = fecha_match.group(1)
-                                            if hora_match:
-                                                hora_clean = hora_match.group(1)
-                                        
-                                        # Observación limpia
-                                        observacion = ""
-                                        if fecha_fin and fecha_fin != fecha_inicio:
-                                            observacion = f"Hasta: {fecha_fin}"
-                                        
-                                        evento = {
-                                            'evento': fase_nombre.strip(),
-                                            'fecha': fecha_clean,
-                                            'hora': hora_clean,
-                                            'observacion': observacion,
-                                            'orden': len(eventos) + 1,
-                                            'regresar': True
-                                        }
-                                        
-                                        eventos.append(evento)
-                                        table_found = True
-                                        logger.info(f"Evento extraído: {fase_nombre}")
-                                
-                            except Exception as e:
-                                logger.warning(f"Error procesando fila cronograma {i}: {e}")
-                                continue
-                        
-                        if table_found:
-                            break
-                            
-                except Exception as e:
-                    logger.warning(f"Error con tabla selector {table_selector}: {e}")
-                    continue
-            
-            # Estrategia 2: Si no encuentra tabla, buscar patrones de texto específicos del cronograma
-            if not eventos:
-                logger.info("Tabla de cronograma no encontrada, buscando patrones de texto...")
-                
-                # Filtrar contenido para evitar mezcla con inmuebles
-                clean_content = ""
-                for line in current_content.split('\n'):
-                    line = line.strip()
-                    # Excluir líneas que claramente son de inmuebles
-                    if not any(word in line.upper() for word in ['PARTIDA REGISTRAL', 'TIPO INMUEBLE', 'CARGA Y/O GRAVAMEN', 'SCOTIABANK']):
-                        clean_content += line + " "
-                
-                # Patrones específicos para fases del cronograma judicial
-                fase_patterns = [
-                    (r'Publicación\s+e?\s*Inscripci[óo]n.*?(\d{1,2}/\d{1,2}/\d{4}).*?(\d{1,2}:\d{2})', 'Publicación e Inscripción'),
-                    (r'Validaci[óo]n\s+de\s+Inscripci[óo]n.*?(\d{1,2}/\d{1,2}/\d{4}).*?(\d{1,2}:\d{2})', 'Validación de Inscripción'),
-                    (r'Presentaci[óo]n\s+de\s+Ofertas.*?(\d{1,2}/\d{1,2}/\d{4}).*?(\d{1,2}:\d{2})', 'Presentación de Ofertas'),
-                    (r'Pago\s+Saldo.*?(\d{1,2}/\d{1,2}/\d{4}).*?(\d{1,2}:\d{2})', 'Pago Saldo'),
-                    (r'Validaci[óo]n\s+del\s+Saldo.*?(\d{1,2}/\d{1,2}/\d{4}).*?(\d{1,2}:\d{2})', 'Validación del Saldo')
+            try:
+                # Buscar tabla de cronograma dinámicamente
+                table_selectors = [
+                    "//table[.//th[contains(text(), 'FASE')] or .//th[contains(text(), 'Fase')]]",
+                    "//table[.//th[contains(text(), 'FECHA')] or .//th[contains(text(), 'Fecha')]]", 
+                    "//table[.//th[contains(text(), 'INICIO')] or .//th[contains(text(), 'Inicio')]]",
+                    "//table[.//td[contains(text(), 'Publicación')] or .//td[contains(text(), 'Presentación')]]"
                 ]
                 
-                for i, (pattern, nombre_evento) in enumerate(fase_patterns):
-                    matches = re.finditer(pattern, clean_content, re.IGNORECASE)
-                    for match in matches:
-                        fecha = match.group(1)
-                        hora = match.group(2) if match.lastindex >= 2 else ""
+                table = None
+                for selector in table_selectors:
+                    table = safe_find_element(self.driver, By.XPATH, selector, optional=True)
+                    if table:
+                        logger.info(f"Tabla cronograma encontrada: {selector}")
+                        break
+                
+                if table:
+                    # Extraer filas dinámicamente
+                    data_rows = table.find_elements(By.XPATH, ".//tbody/tr[td] | .//tr[td and not(th)]")
+                    
+                    for i, row in enumerate(data_rows):
+                        try:
+                            cells = row.find_elements(By.XPATH, ".//td")
+                            if len(cells) < 2:
+                                continue
+                            
+                            # Extraer valores de celdas dinámicamente
+                            cell_values = []
+                            for cell in cells:
+                                cell_text = safe_get_text(cell).strip()
+                                if cell_text:
+                                    cell_values.append(cell_text)
+                            
+                            if not cell_values:
+                                continue
+                            
+                            # Identificar cual celda contiene el nombre del evento
+                            evento_nombre = ""
+                            fecha_valor = ""
+                            hora_valor = ""
+                            
+                            for j, value in enumerate(cell_values):
+                                # Buscar nombre de evento (contiene palabras clave de fases judiciales)
+                                if any(keyword in value.upper() for keyword in ['PUBLICACIÓN', 'VALIDACIÓN', 'PRESENTACIÓN', 'PAGO', 'INSCRIPCIÓN']):
+                                    evento_nombre = value
+                                # Buscar fecha (formato DD/MM/AAAA)
+                                elif re.search(r'\d{1,2}/\d{1,2}/\d{4}', value):
+                                    if not fecha_valor:  # Tomar primera fecha encontrada
+                                        fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', value)
+                                        if fecha_match:
+                                            fecha_valor = fecha_match.group(1)
+                                    # Buscar hora en la misma celda
+                                    hora_match = re.search(r'(\d{1,2}:\d{2})', value)
+                                    if hora_match:
+                                        hora_valor = hora_match.group(1)
+                            
+                            # Validar que encontramos un evento válido
+                            if (evento_nombre and 
+                                evento_nombre.upper() not in ['FASE', 'FECHA', 'HEADER', 'N°'] and
+                                len(evento_nombre) > 5):
+                                
+                                evento = {
+                                    'evento': evento_nombre.strip(),
+                                    'fecha': fecha_valor,
+                                    'hora': hora_valor,
+                                    'observacion': "",
+                                    'orden': len(eventos) + 1,
+                                    'regresar': True
+                                }
+                                
+                                eventos.append(evento)
+                                logger.info(f"Evento {len(eventos)} extraído: {evento_nombre}")
+                                
+                        except Exception as e:
+                            logger.warning(f"Error procesando fila {i}: {e}")
+                            continue
+                
+                # Método alternativo: buscar patrones en texto si no hay tabla
+                if not eventos:
+                    logger.info("Tabla no encontrada, buscando patrones de texto...")
+                    
+                    body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
+                    
+                    # Patrones genéricos para fases judiciales
+                    fase_keywords = [
+                        'Publicación e Inscripción',
+                        'Validación de Inscripción', 
+                        'Presentación de Ofertas',
+                        'Pago Saldo',
+                        'Validación del Saldo'
+                    ]
+                    
+                    for keyword in fase_keywords:
+                        # Buscar el keyword seguido de fecha
+                        pattern = rf'{re.escape(keyword)}.*?(\d{{1,2}}/\d{{1,2}}/\d{{4}})'
+                        match = re.search(pattern, body_text, re.IGNORECASE)
                         
-                        # Verificar que no es duplicado
-                        if not any(e['evento'] == nombre_evento for e in eventos):
+                        if match:
+                            fecha = match.group(1)
+                            
+                            # Buscar hora cerca de la fecha
+                            context = match.group(0)
+                            hora_match = re.search(r'(\d{1,2}:\d{2})', context)
+                            hora = hora_match.group(1) if hora_match else ""
+                            
                             evento = {
-                                'evento': nombre_evento,
+                                'evento': keyword,
                                 'fecha': fecha,
                                 'hora': hora,
                                 'observacion': "",
@@ -1061,47 +945,47 @@ class REMAJUScraper:
                                 'regresar': True
                             }
                             eventos.append(evento)
-                            logger.info(f"Evento extraído por patrón: {nombre_evento}")
-                
-                # Si aún no hay eventos, buscar fechas que no sean de inmuebles
-                if not eventos:
-                    fechas_texto = re.findall(r'(\d{1,2}/\d{1,2}/\d{4})', clean_content)
-                    fechas_unicas = []
+                            logger.info(f"Evento extraído por patrón: {keyword}")
                     
-                    # Filtrar fechas que no sean de documentos/escrituras
-                    for fecha in fechas_texto:
-                        year = int(fecha.split('/')[-1])
-                        # Solo fechas futuras o recientes (cronograma), no históricas (escrituras)
-                        if year >= 2024:
+                    # Último recurso: buscar cualquier fecha futura
+                    if not eventos:
+                        fechas = re.findall(r'(\d{1,2}/\d{1,2}/\d{4})', body_text)
+                        fechas_futuras = []
+                        
+                        for fecha in fechas:
+                            try:
+                                year = int(fecha.split('/')[-1])
+                                if year >= 2024:  # Solo fechas futuras/recientes
+                                    fechas_futuras.append(fecha)
+                            except:
+                                continue
+                        
+                        # Eliminar duplicados manteniendo orden
+                        fechas_unicas = []
+                        for fecha in fechas_futuras:
                             if fecha not in fechas_unicas:
                                 fechas_unicas.append(fecha)
-                    
-                    for i, fecha in enumerate(fechas_unicas[:5]):  # Máximo 5 eventos
-                        evento = {
-                            'evento': f"Evento cronograma {i+1}",
-                            'fecha': fecha,
-                            'hora': "09:00",
-                            'observacion': "",
-                            'orden': i + 1,
-                            'regresar': True
-                        }
-                        eventos.append(evento)
-            
-            # PASO 4: Validación final - asegurar que no hay contenido de inmuebles
-            eventos_limpios = []
-            for evento in eventos:
-                # Verificar que el evento no contenga datos de inmuebles
-                evento_text = evento['evento'] + " " + evento.get('observacion', '')
-                if not any(word in evento_text.upper() for word in ['PARTIDA', 'SCOTIABANK', 'HIPOTECA', 'TIPO INMUEBLE', 'CARGA']):
-                    eventos_limpios.append(evento)
-                else:
-                    logger.warning(f"Evento descartado por contener datos de inmuebles: {evento['evento']}")
-            
-            logger.info(f"Tab Cronograma: {len(eventos_limpios)} eventos extraídos correctamente")
-            return eventos_limpios
+                        
+                        for i, fecha in enumerate(fechas_unicas[:5]):  # Máximo 5
+                            evento = {
+                                'evento': f"Evento {i+1}",
+                                'fecha': fecha,
+                                'hora': "",
+                                'observacion': "",
+                                'orden': i + 1,
+                                'regresar': True
+                            }
+                            eventos.append(evento)
+                
+                logger.info(f"Tab Cronograma: {len(eventos)} eventos extraídos")
+                return eventos
+                
+            except Exception as e:
+                logger.error(f"Error extrayendo cronograma: {e}")
+                return []
             
         except Exception as e:
-            logger.error(f"Error en tab Cronograma: {e}")
+            logger.warning(f"Error en tab Cronograma: {e}")
             return []
     
     def extract_complete_details(self):
