@@ -8,6 +8,7 @@ import time
 import logging
 import re
 from datetime import datetime
+from typing import Dict, List, Any, Optional
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -22,11 +23,58 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://remaju.pj.gob.pe"
 MAIN_URL = f"{BASE_URL}/remaju/pages/publico/remateExterno.xhtml"
-MAX_DETAILS = int(os.environ.get('MAX_DETAILS', '5'))
+
+# Configuración escalable
+MAX_PAGES = int(os.environ.get('MAX_PAGES', '20'))  # Mínimo 20 páginas
+MAX_REMATES_TOTAL = int(os.environ.get('MAX_REMATES_TOTAL', '100'))  # Mínimo 80 remates
+MAX_DETAILS = int(os.environ.get('MAX_DETAILS', '80'))  # Detalles a extraer
 HEADLESS = os.environ.get('HEADLESS', 'true').lower() == 'true'
 
 # ARCHIVO ESPECÍFICO QUE ESPERA EL CI/CD
 RESULT_FILE = 'remates_result.json'
+
+# SCHEMA CONSISTENTE - Todos los remates tendrán estos campos
+REMATE_SCHEMA = {
+    "numero_remate": "",
+    "titulo_card": "",
+    "ubicacion_corta": "",
+    "fecha_presentacion_oferta": "",
+    "precio_base_texto": "",
+    "precio_base_numerico": 0.0,
+    "moneda": "",
+    "tipo_convocatoria": "",
+    "estado": "",
+    "extraction_method": "",
+    "page_number": 0,
+    "position_in_page": 0
+}
+
+DETALLE_SCHEMA = {
+    "expediente": "",
+    "numero_expediente_completo": "",
+    "distrito_judicial": "",
+    "organo_jurisdiccional": "",
+    "instancia": "",
+    "juez": "",
+    "especialista": "",
+    "materia": "",
+    "resolucion_numero": "",
+    "fecha_resolucion": "",
+    "convocatoria": "",
+    "tasacion": "",
+    "precio_base": "",
+    "incremento_ofertas": "",
+    "arancel": "",
+    "oblaje": "",
+    "descripcion": "",
+    "area_m2": "",
+    "partida_registral": "",
+    "num_inscritos": "",
+    "extraction_timestamp": "",
+    "source_url": "",
+    "extraction_quality": "",
+    "quality_score": 0
+}
 
 class PrimeFacesWaitConditions:
     """Condiciones de espera específicas para PrimeFaces"""
@@ -67,18 +115,27 @@ class PrimeFacesWaitConditions:
                 PrimeFacesWaitConditions.document_ready_complete(driver))
 
 def create_chrome_driver():
-    """Configurar driver Chrome para CI/CD"""
+    """Configurar driver Chrome para scraping escalable"""
     try:
         chrome_options = Options()
         
-        # Configuración obligatoria para CI/CD
+        # Configuración para CI/CD
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--disable-plugins")
+        chrome_options.add_argument("--disable-images")  # Acelerar carga
+        chrome_options.add_argument("--disable-javascript-harmony-shipping")
         chrome_options.add_argument("--window-size=1920,1080")
+        
+        # Optimizaciones para velocidad
+        chrome_options.add_argument("--disable-background-timer-throttling")
+        chrome_options.add_argument("--disable-renderer-backgrounding")
+        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+        chrome_options.add_argument("--disable-features=TranslateUI")
+        chrome_options.add_argument("--disable-ipc-flooding-protection")
         
         # User agent
         chrome_options.add_argument("--user-agent=Mozilla/5.0 (Linux; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -90,36 +147,34 @@ def create_chrome_driver():
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
         driver = webdriver.Chrome(options=chrome_options)
-        driver.set_page_load_timeout(90)
-        driver.implicitly_wait(10)
+        driver.set_page_load_timeout(60)  # Reducido para velocidad
+        driver.implicitly_wait(8)
         
         # Anti-detección
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-        logger.info("✅ Driver Chrome configurado para CI/CD")
+        logger.info("✅ Driver configurado para scraping escalable")
         return driver
         
     except Exception as e:
         logger.error(f"❌ Error configurando driver: {e}")
         return None
 
-def wait_for_primefaces_ready(driver, timeout=30):
-    """Esperar que PrimeFaces esté completamente cargado"""
+def wait_for_primefaces_ready(driver, timeout=25):
+    """Esperar que PrimeFaces esté listo (optimizado)"""
     try:
-        logger.info("⏳ Esperando PrimeFaces...")
+        logger.debug("⏳ Esperando PrimeFaces...")
         
-        # Esperar que PrimeFaces esté definido
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script("return typeof window.PrimeFaces !== 'undefined'")
         )
         
-        # Esperar que no haya AJAX activo
         WebDriverWait(driver, timeout).until(
             lambda d: PrimeFacesWaitConditions.all_ajax_complete(d)
         )
         
-        time.sleep(3)  # Más tiempo para estabilización
-        logger.info("✅ PrimeFaces listo")
+        time.sleep(2)  # Reducido
+        logger.debug("✅ PrimeFaces listo")
         return True
         
     except:
@@ -127,38 +182,45 @@ def wait_for_primefaces_ready(driver, timeout=30):
         return False
 
 def safe_get_text(element, default=""):
-    """Obtener texto de forma segura"""
-    for attempt in range(2):
-        try:
-            if element:
-                text = element.get_attribute('textContent') or element.text or default
-                return ' '.join(text.strip().split())
-            return default
-        except StaleElementReferenceException:
-            if attempt == 1:
-                return default
-            time.sleep(0.3)
-        except:
-            return default
-    return default
+    """Obtener texto de forma segura y optimizada"""
+    try:
+        if element:
+            text = element.get_attribute('textContent') or element.text or default
+            return ' '.join(text.strip().split())
+        return default
+    except:
+        return default
+
+def apply_schema(data: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Aplicar schema consistente a los datos"""
+    result = schema.copy()
+    
+    for key in schema:
+        if key in data and data[key] is not None:
+            if isinstance(schema[key], str):
+                result[key] = str(data[key])[:500]  # Limitar longitud
+            elif isinstance(schema[key], (int, float)):
+                try:
+                    result[key] = float(data[key]) if data[key] else 0.0
+                except:
+                    result[key] = 0.0
+            else:
+                result[key] = data[key]
+    
+    return result
 
 def extract_price_info(text):
-    """Extraer precio y moneda con patrones mejorados"""
+    """Extraer precio y moneda mejorado"""
     if not text:
         return "", 0.0, ""
     
-    # Limpiar texto primero
     clean_text = re.sub(r'\s+', ' ', text.strip())
     
     patterns = [
-        # Precio Base específico
         (r'Precio\s+Base[:\s]*([USD|S/\.|\$]*)\s*([\d,]+\.?\d*)', 1, 2),
-        # Moneda seguida de número
         (r'(S/\.|\$|USD)\s*([\d,]+\.?\d*)', 1, 2),
-        # Número seguido de moneda
         (r'([\d,]+\.?\d*)\s*(SOLES|DOLARES|USD|S/\.)', 1, 2),
-        # Tasación o precio base en contexto
-        (r'(?:Tasaci[óo]n|Base)[:\s]*([USD|S/\.|\$]*)\s*([\d,]+\.?\d*)', 1, 2)
+        (r'Base[:\s]*([USD|S/\.|\$]*)\s*([\d,]+\.?\d*)', 1, 2)
     ]
     
     for pattern, currency_group, amount_group in patterns:
@@ -168,15 +230,8 @@ def extract_price_info(text):
                 currency_text = match.group(currency_group)
                 amount_text = match.group(amount_group)
                 
-                # Determinar moneda
-                if currency_text in ["$", "USD", "DOLARES"] or "USD" in currency_text.upper():
-                    currency = "USD"
-                else:
-                    currency = "S/."
-                
-                # Convertir monto
-                amount_str = amount_text.replace(',', '')
-                amount = float(amount_str)
+                currency = "USD" if currency_text in ["$", "USD", "DOLARES"] or "USD" in currency_text.upper() else "S/."
+                amount = float(amount_text.replace(',', ''))
                 
                 return f"{currency} {amount_text}", amount, currency
             except:
@@ -184,132 +239,203 @@ def extract_price_info(text):
     
     return text, 0.0, ""
 
-class REMAJUScraperPrecision:
-    """Scraper de alta precisión para REMAJU"""
+class REMAJUScraperScalable:
+    """Scraper escalable para múltiples páginas con estructura consistente"""
     
     def __init__(self):
         self.driver = None
         self.main_page_url = ""
+        self.current_page = 1
+        self.total_remates_extracted = 0
+        self.all_remates = []
+        self.pagination_info = {
+            'current_page': 1,
+            'total_pages': 0,
+            'pages_processed': 0,
+            'has_next_page': True
+        }
         self.stats = {
             'start_time': datetime.now(),
-            'total_remates': 0,
-            'remates_with_details': 0,
-            'extraction_precision_errors': 0,
-            'field_extraction_success': {},
-            'errors': 0
+            'pages_processed': 0,
+            'total_remates_found': 0,
+            'total_remates_detailed': 0,
+            'pagination_errors': 0,
+            'extraction_errors': 0,
+            'consistency_errors': 0,
+            'field_completion_rates': {}
         }
     
     def setup(self):
-        """Configurar scraper para CI/CD"""
+        """Configurar scraper escalable"""
         try:
             self.driver = create_chrome_driver()
             if not self.driver:
                 return False
+            logger.info("✅ Driver configurado para scraping escalable")
             return True
         except Exception as e:
-            logger.error(f"❌ Error en setup: {e}")
+            logger.error(f"❌ Error en setup escalable: {e}")
             return False
     
     def navigate_to_main_page(self):
         """Navegar a página principal"""
         try:
-            logger.info("🌐 Navegando a REMAJU...")
+            logger.info("🌐 Navegando a REMAJU para scraping escalable...")
             self.driver.get(MAIN_URL)
             
-            # Esperar carga básica
             WebDriverWait(self.driver, 30).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             
-            # Esperar PrimeFaces con más tiempo
-            wait_for_primefaces_ready(self.driver, timeout=40)
+            wait_for_primefaces_ready(self.driver, timeout=30)
             
             self.main_page_url = self.driver.current_url
-            logger.info(f"✅ Página cargada: {self.main_page_url}")
+            logger.info(f"✅ Página principal cargada: {self.main_page_url}")
             
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error navegando: {e}")
+            logger.error(f"❌ Error navegando a página principal: {e}")
             return False
     
-    def extract_remates_precision(self):
-        """Extraer remates con mayor precisión en estructura"""
-        remates = []
+    def detect_pagination_info(self):
+        """Detectar información de paginación"""
         try:
-            logger.info("📋 Extrayendo remates con precisión mejorada...")
+            logger.info("🔍 Detectando información de paginación...")
             
-            # Esperar más tiempo para que todo cargue
-            time.sleep(5)
-            
-            # Intentar múltiples estrategias de extracción estructurada
-            remates = self.extract_structured_data()
-            
-            if not remates:
-                logger.info("🔄 Fallback a extracción de texto...")
-                remates = self.extract_from_page_text()
-            
-            self.stats['total_remates'] = len(remates)
-            logger.info(f"📊 Total extraído: {len(remates)} remates")
-            
-            return remates
-            
-        except Exception as e:
-            logger.error(f"❌ Error en extracción de precisión: {e}")
-            return []
-    
-    def extract_structured_data(self):
-        """Intentar extracción estructurada mejorada"""
-        remates = []
-        try:
-            logger.info("🎯 Intentando extracción estructurada...")
-            
-            # Estrategia 1: Buscar componentes PrimeFaces específicos
-            primefaces_selectors = [
-                "//table[contains(@class, 'ui-datatable')]",
-                "//div[contains(@class, 'ui-datatable')]",
-                "//div[contains(@class, 'ui-datagrid')]",
-                "//div[contains(@class, 'ui-panel')]//table",
-                "//form//table"
+            # Buscar componentes de paginación PrimeFaces
+            pagination_selectors = [
+                "//div[contains(@class, 'ui-paginator')]",
+                "//span[contains(@class, 'ui-paginator')]",
+                "//table[contains(@class, 'ui-paginator')]",
+                "//div[contains(@class, 'paginator')]"
             ]
             
-            for selector in primefaces_selectors:
+            pagination_element = None
+            for selector in pagination_selectors:
                 try:
-                    tables = self.driver.find_elements(By.XPATH, selector)
-                    for table in tables:
-                        table_text = safe_get_text(table)
-                        if 'remate' in table_text.lower() and len(table_text) > 200:
-                            logger.info(f"🎯 Tabla relevante encontrada: {selector}")
-                            extracted = self.extract_from_table_precise(table)
-                            if extracted:
-                                remates.extend(extracted)
-                                logger.info(f"✅ Extraídos {len(extracted)} remates de tabla estructurada")
-                                break
-                    if remates:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        pagination_element = elements[0]
+                        logger.info(f"📄 Paginador encontrado: {selector}")
                         break
-                except Exception as e:
+                except:
                     continue
             
-            # Estrategia 2: Buscar filas de tabla directamente
-            if not remates:
-                row_selectors = [
-                    "//table//tbody//tr[td[contains(text(), 'Remate') or contains(text(), '20')]]",
-                    "//tr[td[contains(text(), 'Remate')]]",
-                    "//div[contains(@class, 'ui-datatable')]//tr"
-                ]
+            if pagination_element:
+                pagination_text = safe_get_text(pagination_element)
+                logger.info(f"📄 Texto paginador: {pagination_text[:100]}...")
                 
-                for selector in row_selectors:
-                    try:
-                        rows = self.driver.find_elements(By.XPATH, selector)
-                        if rows:
-                            logger.info(f"🎯 Filas encontradas: {len(rows)} en {selector}")
-                            extracted = self.extract_from_rows_precise(rows)
-                            if extracted:
-                                remates.extend(extracted)
-                                logger.info(f"✅ Extraídos {len(extracted)} remates de filas")
-                                break
-                    except Exception as e:
-                        continue
+                # Buscar total de páginas
+                page_match = re.search(r'(\d+)\s*de\s*(\d+)', pagination_text)
+                if page_match:
+                    current = int(page_match.group(1))
+                    total = int(page_match.group(2))
+                    self.pagination_info.update({
+                        'current_page': current,
+                        'total_pages': total,
+                        'has_next_page': current < total
+                    })
+                    logger.info(f"📄 Paginación detectada: {current}/{total} páginas")
+                    return True
+            
+            # Fallback: buscar botones siguiente/anterior
+            next_buttons = self.driver.find_elements(By.XPATH, 
+                "//button[contains(@class, 'ui-paginator-next')] | "
+                "//a[contains(@class, 'ui-paginator-next')] | "
+                "//span[contains(@class, 'ui-paginator-next')] | "
+                "//button[contains(text(), 'Siguiente')] | "
+                "//a[contains(text(), 'Siguiente')]"
+            )
+            
+            if next_buttons:
+                self.pagination_info['has_next_page'] = any(btn.is_enabled() for btn in next_buttons)
+                logger.info(f"📄 Botón siguiente encontrado: {self.pagination_info['has_next_page']}")
+                return True
+            
+            logger.warning("⚠️ No se detectó paginación, asumiendo página única")
+            self.pagination_info.update({
+                'total_pages': 1,
+                'has_next_page': False
+            })
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error detectando paginación: {e}")
+            return False
+    
+    def extract_remates_from_current_page(self):
+        """Extraer remates de la página actual con schema consistente"""
+        try:
+            logger.info(f"📋 Extrayendo remates de página {self.current_page}...")
+            
+            page_remates = []
+            
+            # Esperar que la página cargue completamente
+            time.sleep(3)
+            
+            # Estrategia 1: Extracción estructurada
+            page_remates = self.extract_structured_from_page()
+            
+            # Estrategia 2: Fallback si no encuentra estructura
+            if not page_remates:
+                page_remates = self.extract_fallback_from_page()
+            
+            # Aplicar schema consistente a todos los remates
+            consistent_remates = []
+            for i, remate_data in enumerate(page_remates):
+                remate_data['page_number'] = self.current_page
+                remate_data['position_in_page'] = i + 1
+                
+                consistent_remate = apply_schema(remate_data, REMATE_SCHEMA)
+                consistent_remates.append(consistent_remate)
+            
+            self.stats['total_remates_found'] += len(consistent_remates)
+            logger.info(f"✅ Extraídos {len(consistent_remates)} remates de página {self.current_page}")
+            
+            return consistent_remates
+            
+        except Exception as e:
+            logger.error(f"❌ Error extrayendo remates de página {self.current_page}: {e}")
+            self.stats['extraction_errors'] += 1
+            return []
+    
+    def extract_structured_from_page(self):
+        """Extracción estructurada de la página"""
+        remates = []
+        try:
+            # Buscar tablas y componentes estructurados
+            structured_selectors = [
+                "//table[contains(@class, 'ui-datatable')]//tbody//tr",
+                "//div[contains(@class, 'ui-datatable')]//tbody//tr",
+                "//div[contains(@class, 'ui-datagrid')]//div",
+                "//table//tbody//tr[td[contains(text(), 'Remate') or contains(text(), '20')]]",
+                "//div[contains(@class, 'remate') or contains(@class, 'item')]"
+            ]
+            
+            for selector in structured_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        logger.info(f"🎯 Elementos estructurados encontrados: {len(elements)} con {selector}")
+                        
+                        for i, element in enumerate(elements[:50]):  # Máximo 50 por página
+                            try:
+                                element_text = safe_get_text(element)
+                                
+                                if len(element_text) > 30 and self.contains_remate_info(element_text):
+                                    remate_data = self.extract_remate_from_element(element, element_text, i)
+                                    if remate_data:
+                                        remates.append(remate_data)
+                                        
+                            except Exception as e:
+                                continue
+                        
+                        if remates:
+                            break  # Si encontró remates estructurados, usar esos
+                            
+                except Exception as e:
+                    continue
             
             return remates
             
@@ -317,256 +443,137 @@ class REMAJUScraperPrecision:
             logger.warning(f"⚠️ Error en extracción estructurada: {e}")
             return []
     
-    def extract_from_table_precise(self, table):
-        """Extraer desde tabla con mayor precisión"""
+    def extract_fallback_from_page(self):
+        """Extracción fallback desde texto de página"""
         remates = []
         try:
-            # Buscar filas en la tabla
-            rows = table.find_elements(By.XPATH, ".//tr")
-            logger.info(f"📊 Procesando tabla con {len(rows)} filas")
-            
-            for i, row in enumerate(rows):
-                try:
-                    cells = row.find_elements(By.XPATH, ".//td")
-                    if len(cells) < 2:  # Skip headers or empty rows
-                        continue
-                    
-                    cell_texts = [safe_get_text(cell) for cell in cells]
-                    combined_text = " ".join(cell_texts)
-                    
-                    # Buscar número de remate
-                    numero_match = re.search(r'Remate\s+N°?\s*(\d+)', combined_text, re.IGNORECASE)
-                    if not numero_match:
-                        numero_match = re.search(r'(?:^|\s)(\d{4,6})(?:\s|$)', combined_text)
-                    
-                    if numero_match:
-                        numero_remate = numero_match.group(1)
-                        
-                        # Extraer información precisa de celdas
-                        precio_texto, precio_numerico, moneda = self.extract_price_from_cells(cell_texts)
-                        fecha = self.extract_date_from_cells(cell_texts)
-                        ubicacion = self.extract_location_from_cells(cell_texts)
-                        
-                        remate_data = {
-                            'numero_remate': numero_remate,
-                            'titulo_card': f"Remate N° {numero_remate}",
-                            'ubicacion_corta': ubicacion,
-                            'fecha_presentacion_oferta': fecha,
-                            'precio_base_texto': precio_texto,
-                            'precio_base_numerico': precio_numerico,
-                            'moneda': moneda,
-                            'button_index': i,
-                            'cell_data': cell_texts,
-                            'extraction_method': 'table_structured_precise'
-                        }
-                        
-                        remates.append(remate_data)
-                        logger.info(f"✅ Remate tabla preciso {numero_remate}: {ubicacion}")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Error procesando fila {i}: {e}")
-                    continue
-            
-            return remates
-            
-        except Exception as e:
-            logger.error(f"❌ Error en extracción de tabla precisa: {e}")
-            return []
-    
-    def extract_from_rows_precise(self, rows):
-        """Extraer desde filas con mayor precisión"""
-        remates = []
-        try:
-            logger.info(f"📊 Procesando {len(rows)} filas precisas")
-            
-            for i, row in enumerate(rows[:10]):  # Limitar a 10 para mejor precisión
-                try:
-                    row_text = safe_get_text(row)
-                    
-                    # Verificar que tiene contenido relevante
-                    if len(row_text) < 20 or not any(keyword in row_text.lower() for keyword in ['remate', '20']):
-                        continue
-                    
-                    # Buscar número de remate
-                    numero_match = re.search(r'Remate\s+N°?\s*(\d+)', row_text, re.IGNORECASE)
-                    if not numero_match:
-                        numero_match = re.search(r'(?:^|\s)(\d{4,6})(?:\s|$)', row_text)
-                    
-                    if numero_match:
-                        numero_remate = numero_match.group(1)
-                        
-                        # Extraer celdas individuales para mayor precisión
-                        cells = row.find_elements(By.XPATH, ".//td")
-                        cell_texts = [safe_get_text(cell) for cell in cells if safe_get_text(cell)]
-                        
-                        # Extraer información precisa
-                        precio_texto, precio_numerico, moneda = self.extract_price_from_cells(cell_texts)
-                        if not precio_texto:
-                            precio_texto, precio_numerico, moneda = extract_price_info(row_text)
-                        
-                        fecha = self.extract_date_from_cells(cell_texts)
-                        if not fecha:
-                            fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row_text)
-                            fecha = fecha_match.group(1) if fecha_match else ""
-                        
-                        ubicacion = self.extract_location_from_cells(cell_texts)
-                        if not ubicacion:
-                            ubicacion = self.extract_location_from_text(row_text)
-                        
-                        remate_data = {
-                            'numero_remate': numero_remate,
-                            'titulo_card': f"Remate N° {numero_remate}",
-                            'ubicacion_corta': ubicacion,
-                            'fecha_presentacion_oferta': fecha,
-                            'precio_base_texto': precio_texto,
-                            'precio_base_numerico': precio_numerico,
-                            'moneda': moneda,
-                            'button_index': i,
-                            'cell_data': cell_texts,
-                            'extraction_method': 'rows_structured_precise'
-                        }
-                        
-                        remates.append(remate_data)
-                        logger.info(f"✅ Remate fila preciso {numero_remate}: {ubicacion}")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Error procesando fila {i}: {e}")
-                    continue
-            
-            return remates
-            
-        except Exception as e:
-            logger.error(f"❌ Error en extracción de filas precisas: {e}")
-            return []
-    
-    def extract_price_from_cells(self, cell_texts):
-        """Extraer precio de celdas específicas"""
-        precio_texto, precio_numerico, moneda = "", 0.0, ""
-        
-        for cell_text in cell_texts:
-            if precio_texto:  # Ya encontró precio
-                break
-                
-            # Buscar patrones de precio en esta celda específica
-            price_patterns = [
-                r'(S/\.|\$|USD)\s*([\d,]+\.?\d*)',
-                r'([\d,]+\.?\d*)\s*(SOLES|DOLARES|USD)',
-                r'Precio[:\s]*(S/\.|\$|USD)?\s*([\d,]+\.?\d*)',
-                r'Base[:\s]*(S/\.|\$|USD)?\s*([\d,]+\.?\d*)'
-            ]
-            
-            for pattern in price_patterns:
-                match = re.search(pattern, cell_text, re.IGNORECASE)
-                if match:
-                    try:
-                        if len(match.groups()) == 2:
-                            g1, g2 = match.groups()
-                            if g1 and any(char.isdigit() for char in g1):
-                                amount_str = g1.replace(',', '')
-                                currency = g2
-                            else:
-                                amount_str = g2.replace(',', '')
-                                currency = g1
-                            
-                            amount = float(amount_str)
-                            currency = "USD" if currency in ["$", "USD", "DOLARES"] else "S/."
-                            
-                            precio_texto = f"{currency} {match.group(2) if any(char.isdigit() for char in match.group(2)) else match.group(1)}"
-                            precio_numerico = amount
-                            moneda = currency
-                            break
-                    except:
-                        continue
-        
-        return precio_texto, precio_numerico, moneda
-    
-    def extract_date_from_cells(self, cell_texts):
-        """Extraer fecha de celdas específicas"""
-        for cell_text in cell_texts:
-            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
-            if date_match:
-                return date_match.group(1)
-        return ""
-    
-    def extract_location_from_cells(self, cell_texts):
-        """Extraer ubicación de celdas específicas"""
-        ciudades = ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO', 'PIURA', 'CHICLAYO', 'HUANCAYO']
-        
-        for cell_text in cell_texts:
-            cell_upper = cell_text.upper()
-            for ciudad in ciudades:
-                if ciudad in cell_upper:
-                    return ciudad
-        return ""
-    
-    def extract_location_from_text(self, text):
-        """Extraer ubicación de texto general"""
-        ciudades = ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO', 'PIURA', 'CHICLAYO', 'HUANCAYO']
-        text_upper = text.upper()
-        for ciudad in ciudades:
-            if ciudad in text_upper:
-                return ciudad
-        return ""
-    
-    def extract_from_page_text(self):
-        """Fallback: extraer desde texto de página"""
-        remates = []
-        try:
-            logger.info("🔄 Extracción fallback desde texto...")
+            logger.info("🔄 Usando extracción fallback...")
             
             body = self.driver.find_element(By.TAG_NAME, "body")
             body_text = safe_get_text(body)
             
             # Buscar números de remate
-            remate_numbers = re.findall(r'Remate\s+N°?\s*(\d+)', body_text, re.IGNORECASE)
-            unique_numbers = list(set(remate_numbers))[:10]  # Máximo 10
+            remate_patterns = [
+                r'Remate\s+N°?\s*(\d+)',
+                r'N°?\s*(\d{4,6})(?:\s|$|[^\d])',
+                r'(\d{4,6})\s*[-:]?\s*Remate'
+            ]
             
-            logger.info(f"🔍 Números encontrados en texto: {len(unique_numbers)}")
+            found_numbers = set()
+            for pattern in remate_patterns:
+                matches = re.findall(pattern, body_text, re.IGNORECASE)
+                found_numbers.update(matches)
+            
+            unique_numbers = sorted(list(found_numbers))[:30]  # Máximo 30 por página
+            logger.info(f"🔍 Números únicos encontrados: {len(unique_numbers)}")
             
             for i, numero in enumerate(unique_numbers):
                 try:
-                    # Buscar contexto más amplio
-                    context = self.extract_enhanced_context(body_text, numero)
-                    
-                    precio_texto, precio_numerico, moneda = extract_price_info(context)
-                    fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', context)
-                    fecha = fecha_match.group(1) if fecha_match else ""
-                    ubicacion = self.extract_location_from_text(context)
-                    
-                    remate_data = {
-                        'numero_remate': numero,
-                        'titulo_card': f"Remate N° {numero}",
-                        'ubicacion_corta': ubicacion,
-                        'fecha_presentacion_oferta': fecha,
-                        'precio_base_texto': precio_texto,
-                        'precio_base_numerico': precio_numerico,
-                        'moneda': moneda,
-                        'button_index': i,
-                        'extraction_method': 'text_fallback_enhanced'
-                    }
-                    
-                    remates.append(remate_data)
-                    logger.info(f"✅ Remate texto mejorado {numero}: {ubicacion}")
-                    
+                    context = self.extract_context_for_number(body_text, numero)
+                    remate_data = self.parse_remate_from_context(numero, context, i)
+                    if remate_data:
+                        remates.append(remate_data)
                 except Exception as e:
                     continue
-                    
+            
             return remates
             
         except Exception as e:
-            logger.error(f"❌ Error en extracción de texto: {e}")
+            logger.error(f"❌ Error en extracción fallback: {e}")
             return []
     
-    def extract_enhanced_context(self, body_text, numero):
-        """Extraer contexto mejorado para un número de remate"""
+    def contains_remate_info(self, text):
+        """Verificar si el texto contiene información de remate"""
+        indicators = [
+            'remate', 'n°', 'precio', 'base', 'soles', 'dolares', 
+            'lima', 'cusco', 'arequipa', 'tasación', '20'
+        ]
+        text_lower = text.lower()
+        return sum(1 for indicator in indicators if indicator in text_lower) >= 2
+    
+    def extract_remate_from_element(self, element, element_text, position):
+        """Extraer información de remate desde elemento"""
         try:
-            # Estrategia 1: Buscar patrón completo
+            # Buscar número de remate
+            numero_match = re.search(r'Remate\s+N°?\s*(\d+)', element_text, re.IGNORECASE)
+            if not numero_match:
+                numero_match = re.search(r'(?:^|\s)(\d{4,6})(?:\s|$)', element_text)
+            
+            if not numero_match:
+                return None
+            
+            numero_remate = numero_match.group(1)
+            
+            # Extraer información desde celdas si es tabla
+            precio_texto, precio_numerico, moneda = "", 0.0, ""
+            fecha = ""
+            ubicacion = ""
+            
+            try:
+                cells = element.find_elements(By.XPATH, ".//td | .//div | .//span")
+                cell_texts = [safe_get_text(cell) for cell in cells if safe_get_text(cell)]
+                
+                combined_text = " ".join(cell_texts)
+                precio_texto, precio_numerico, moneda = extract_price_info(combined_text)
+                
+                # Fecha
+                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', combined_text)
+                fecha = fecha_match.group(1) if fecha_match else ""
+                
+                # Ubicación
+                ciudades = ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO', 'PIURA', 'CHICLAYO', 'HUANCAYO']
+                for ciudad in ciudades:
+                    if ciudad in combined_text.upper():
+                        ubicacion = ciudad
+                        break
+                        
+            except:
+                # Fallback a texto del elemento
+                precio_texto, precio_numerico, moneda = extract_price_info(element_text)
+                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', element_text)
+                fecha = fecha_match.group(1) if fecha_match else ""
+                
+                ciudades = ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO', 'PIURA']
+                for ciudad in ciudades:
+                    if ciudad in element_text.upper():
+                        ubicacion = ciudad
+                        break
+            
+            # Tipo de convocatoria
+            tipo_convocatoria = ""
+            if 'primera' in element_text.lower():
+                tipo_convocatoria = "PRIMERA CONVOCATORIA"
+            elif 'segunda' in element_text.lower():
+                tipo_convocatoria = "SEGUNDA CONVOCATORIA"
+            
+            return {
+                'numero_remate': numero_remate,
+                'titulo_card': f"Remate N° {numero_remate}",
+                'ubicacion_corta': ubicacion,
+                'fecha_presentacion_oferta': fecha,
+                'precio_base_texto': precio_texto,
+                'precio_base_numerico': precio_numerico,
+                'moneda': moneda,
+                'tipo_convocatoria': tipo_convocatoria,
+                'estado': 'ACTIVO',
+                'extraction_method': 'structured_element',
+                'position_in_page': position
+            }
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo de elemento: {e}")
+            return None
+    
+    def extract_context_for_number(self, body_text, numero):
+        """Extraer contexto mejorado para un número"""
+        try:
+            # Estrategia 1: Patrón específico
             pattern = rf'Remate\s+N°?\s*{numero}.*?(?=Remate\s+N°?|\n\n|\Z)'
             match = re.search(pattern, body_text, re.IGNORECASE | re.DOTALL)
             if match and len(match.group(0)) > 50:
                 return match.group(0)
             
-            # Estrategia 2: Buscar líneas alrededor
+            # Estrategia 2: Líneas alrededor
             lines = body_text.split('\n')
             for i, line in enumerate(lines):
                 if numero in line:
@@ -576,80 +583,115 @@ class REMAJUScraperPrecision:
             
             return ""
             
-        except Exception as e:
+        except:
             return ""
     
-    def navigate_to_detail_precision(self, remate_data):
-        """Navegar al detalle con precisión"""
+    def parse_remate_from_context(self, numero, context, position):
+        """Parsear información de remate desde contexto"""
         try:
-            numero_remate = remate_data.get('numero_remate')
-            logger.info(f"🔍 Navegando al detalle (precisión): {numero_remate}")
+            precio_texto, precio_numerico, moneda = extract_price_info(context)
             
-            initial_url = self.driver.current_url
+            fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', context)
+            fecha = fecha_match.group(1) if fecha_match else ""
             
-            # Re-buscar botones con más selectores específicos
-            button_selectors = [
-                f"//button[contains(@class, 'ui-button') and contains(@onclick, '{numero_remate}')]",
-                f"//a[contains(@href, '{numero_remate}')]",
-                "//button[contains(@class, 'ui-button')]",
-                "//span[contains(@class, 'ui-button')]",
-                "//a[contains(@class, 'ui-button')]",
-                "//input[@type='submit' and contains(@value, 'Detalle')]",
-                "//button[contains(text(), 'Detalle') or contains(text(), 'Ver')]"
-            ]
+            ciudades = ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO', 'PIURA', 'CHICLAYO', 'HUANCAYO']
+            ubicacion = ""
+            for ciudad in ciudades:
+                if ciudad in context.upper():
+                    ubicacion = ciudad
+                    break
             
-            for selector in button_selectors:
-                try:
-                    buttons = self.driver.find_elements(By.XPATH, selector)
-                    if buttons:
-                        logger.info(f"🎯 Encontrados {len(buttons)} botones con: {selector}")
-                        
-                        # Probar botones específicos
-                        button_index = remate_data.get('button_index', 0)
-                        indices_to_try = [button_index] + list(range(min(len(buttons), 5)))
-                        
-                        for idx in indices_to_try:
-                            if idx >= len(buttons):
-                                continue
-                            
-                            try:
-                                button = buttons[idx]
-                                if button.is_displayed() and button.is_enabled():
-                                    logger.info(f"🎯 Probando botón índice {idx}")
-                                    
-                                    # Click mejorado
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-                                    time.sleep(1)
-                                    self.driver.execute_script("arguments[0].click();", button)
-                                    
-                                    # Esperar cambio con más tiempo
-                                    if self.wait_for_change_precision(initial_url):
-                                        logger.info(f"✅ Éxito navegación precisa con botón {idx}")
-                                        return True
-                                    else:
-                                        # Regresar si no funcionó
-                                        if self.driver.current_url != initial_url:
-                                            self.driver.get(self.main_page_url)
-                                            wait_for_primefaces_ready(self.driver)
-                                            time.sleep(2)
-                                
-                            except Exception as e:
-                                continue
-                        
-                        break  # Si encontró botones con este selector, no probar otros
-                        
-                except Exception as e:
-                    continue
+            tipo_convocatoria = ""
+            if 'primera' in context.lower():
+                tipo_convocatoria = "PRIMERA CONVOCATORIA"
+            elif 'segunda' in context.lower():
+                tipo_convocatoria = "SEGUNDA CONVOCATORIA"
             
-            logger.warning(f"⚠️ No se pudo navegar con precisión: {numero_remate}")
-            return False
+            return {
+                'numero_remate': numero,
+                'titulo_card': f"Remate N° {numero}",
+                'ubicacion_corta': ubicacion,
+                'fecha_presentacion_oferta': fecha,
+                'precio_base_texto': precio_texto,
+                'precio_base_numerico': precio_numerico,
+                'moneda': moneda,
+                'tipo_convocatoria': tipo_convocatoria,
+                'estado': 'ACTIVO',
+                'extraction_method': 'context_fallback',
+                'position_in_page': position
+            }
             
         except Exception as e:
-            logger.error(f"❌ Error en navegación de precisión: {e}")
+            return None
+    
+    def navigate_to_next_page(self):
+        """Navegar a la siguiente página"""
+        try:
+            logger.info(f"➡️ Navegando de página {self.current_page} a {self.current_page + 1}...")
+            
+            # Buscar botones de siguiente página
+            next_selectors = [
+                "//button[contains(@class, 'ui-paginator-next') and not(contains(@class, 'ui-state-disabled'))]",
+                "//a[contains(@class, 'ui-paginator-next') and not(contains(@class, 'ui-state-disabled'))]",
+                "//span[contains(@class, 'ui-paginator-next') and not(contains(@class, 'ui-state-disabled'))]",
+                "//button[contains(text(), 'Siguiente') and not(@disabled)]",
+                "//a[contains(text(), 'Siguiente')]",
+                f"//a[contains(@class, 'ui-paginator-page') and text()='{self.current_page + 1}']",
+                f"//button[contains(@class, 'ui-paginator-page') and text()='{self.current_page + 1}']"
+            ]
+            
+            next_button = None
+            for selector in next_selectors:
+                try:
+                    buttons = self.driver.find_elements(By.XPATH, selector)
+                    for button in buttons:
+                        if button.is_displayed() and button.is_enabled():
+                            next_button = button
+                            logger.info(f"📄 Botón siguiente encontrado: {selector}")
+                            break
+                    if next_button:
+                        break
+                except:
+                    continue
+            
+            if not next_button:
+                logger.warning("⚠️ No se encontró botón de siguiente página")
+                self.pagination_info['has_next_page'] = False
+                return False
+            
+            # Hacer click en siguiente
+            initial_url = self.driver.current_url
+            
+            try:
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+                time.sleep(1)
+                self.driver.execute_script("arguments[0].click();", next_button)
+                
+                # Esperar cambio de página
+                if self.wait_for_page_change(initial_url):
+                    self.current_page += 1
+                    self.pagination_info['current_page'] = self.current_page
+                    self.stats['pages_processed'] += 1
+                    
+                    logger.info(f"✅ Navegación exitosa a página {self.current_page}")
+                    return True
+                else:
+                    logger.warning("⚠️ No se detectó cambio de página")
+                    self.pagination_info['has_next_page'] = False
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"❌ Error haciendo click en siguiente: {e}")
+                self.stats['pagination_errors'] += 1
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error navegando a siguiente página: {e}")
+            self.stats['pagination_errors'] += 1
             return False
     
-    def wait_for_change_precision(self, initial_url, timeout=15):
-        """Esperar cambio con validación de precisión"""
+    def wait_for_page_change(self, initial_url, timeout=15):
+        """Esperar cambio de página"""
         try:
             start_time = time.time()
             
@@ -658,19 +700,24 @@ class REMAJUScraperPrecision:
                 
                 # URL cambió
                 if current_url != initial_url:
-                    time.sleep(3)  # Más tiempo para carga completa
+                    time.sleep(2)
                     wait_for_primefaces_ready(self.driver, timeout=15)
-                    
-                    # Verificar que realmente cargó contenido de detalle
-                    if self.validate_detail_content():
-                        return True
-                    else:
-                        logger.warning("⚠️ URL cambió pero sin contenido de detalle válido")
-                        return False
-                
-                # Contenido apareció sin cambio de URL (modal/ajax)
-                if self.validate_detail_content():
                     return True
+                
+                # Contenido cambió (para paginación AJAX)
+                try:
+                    page_indicator = self.driver.find_element(By.XPATH, 
+                        "//span[contains(@class, 'ui-paginator-current')] | "
+                        "//div[contains(@class, 'ui-paginator')] | "
+                        "//span[contains(text(), 'página')]"
+                    )
+                    indicator_text = safe_get_text(page_indicator)
+                    if str(self.current_page + 1) in indicator_text:
+                        time.sleep(2)
+                        wait_for_primefaces_ready(self.driver, timeout=10)
+                        return True
+                except:
+                    pass
                 
                 time.sleep(0.5)
             
@@ -679,343 +726,21 @@ class REMAJUScraperPrecision:
         except:
             return False
     
-    def validate_detail_content(self):
-        """Validar que realmente hay contenido de detalle"""
+    def extract_details_batch(self, remates_list):
+        """Extraer detalles de remates en lotes"""
         try:
-            body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body")).lower()
-            
-            # Indicadores más específicos
-            strong_indicators = [
-                'expediente', 'n° expediente', 'numero de expediente',
-                'distrito judicial', 'órgano jurisdiccional',
-                'juez', 'magistrado', 'tasación'
-            ]
-            
-            weak_indicators = [
-                'precio base', 'convocatoria', 'remate',
-                'partida registral', 'cronograma'
-            ]
-            
-            strong_count = sum(1 for indicator in strong_indicators if indicator in body_text)
-            weak_count = sum(1 for indicator in weak_indicators if indicator in body_text)
-            
-            # Debe tener al menos 2 indicadores fuertes O 4 débiles
-            is_valid = strong_count >= 2 or weak_count >= 4
-            
-            if is_valid:
-                logger.info(f"✅ Contenido validado: {strong_count} fuertes, {weak_count} débiles")
-            else:
-                logger.warning(f"⚠️ Contenido insuficiente: {strong_count} fuertes, {weak_count} débiles")
-            
-            return is_valid
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error validando contenido: {e}")
-            return False
-    
-    def extract_detail_precision(self):
-        """Extraer detalle con máxima precisión"""
-        try:
-            logger.info("📋 Extrayendo detalle (máxima precisión)...")
-            
-            # Esperar que todo cargue completamente
-            wait_for_primefaces_ready(self.driver, timeout=15)
-            time.sleep(2)
-            
-            # Obtener texto completo
-            body_text = ""
-            try:
-                body = self.driver.find_element(By.TAG_NAME, "body")
-                body_text = safe_get_text(body)
-                logger.info(f"📄 Contenido detalle: {len(body_text)} caracteres")
-            except:
-                return {'error': 'No se pudo obtener texto del detalle'}
-            
-            # Intentar extracción estructurada primero
-            detail_info = self.extract_fields_structured(body_text)
-            
-            # Si no funciona, usar extracción de texto mejorada
-            if not any(detail_info.values()):
-                detail_info = self.extract_fields_text_enhanced(body_text)
-            
-            # Agregar metadatos
-            detail_info.update({
-                'extraction_timestamp': datetime.now().isoformat(),
-                'source_url': self.driver.current_url,
-                'content_length': len(body_text),
-                'extraction_quality': self.assess_extraction_quality(detail_info)
-            })
-            
-            self.update_field_success_stats(detail_info)
-            
-            logger.info(f"✅ Detalle precisión extraído - Calidad: {detail_info.get('extraction_quality')}")
-            return detail_info
-            
-        except Exception as e:
-            logger.error(f"❌ Error extrayendo detalle de precisión: {e}")
-            return {
-                'error': str(e),
-                'extraction_timestamp': datetime.now().isoformat()
-            }
-    
-    def extract_fields_structured(self, body_text):
-        """Extraer campos usando múltiples estrategias estructuradas"""
-        detail_info = {}
-        
-        # Estrategia 1: Buscar tablas de información
-        try:
-            tables = self.driver.find_elements(By.XPATH, "//table")
-            for table in tables:
-                table_text = safe_get_text(table)
-                if any(keyword in table_text.lower() for keyword in ['expediente', 'distrito', 'juez']):
-                    detail_info.update(self.extract_from_info_table(table))
-                    break
-        except:
-            pass
-        
-        # Estrategia 2: Buscar divs con clases específicas
-        try:
-            info_divs = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'ui-panel') or contains(@class, 'info') or contains(@class, 'detail')]")
-            for div in info_divs:
-                div_text = safe_get_text(div)
-                if len(div_text) > 100:
-                    detail_info.update(self.extract_from_info_div(div_text))
-                    break
-        except:
-            pass
-        
-        # Estrategia 3: Buscar labels y spans
-        try:
-            labels = self.driver.find_elements(By.XPATH, "//label | //span[@class] | //strong")
-            for label in labels:
-                label_text = safe_get_text(label).lower()
-                if any(keyword in label_text for keyword in ['expediente', 'distrito', 'juez', 'precio']):
-                    sibling_text = self.get_sibling_text(label)
-                    if sibling_text:
-                        field_name = self.map_field_name(label_text)
-                        if field_name:
-                            detail_info[field_name] = sibling_text[:200]  # Limitar longitud
-        except:
-            pass
-        
-        return detail_info
-    
-    def extract_from_info_table(self, table):
-        """Extraer información de tabla estructurada"""
-        info = {}
-        try:
-            rows = table.find_elements(By.XPATH, ".//tr")
-            for row in rows:
-                cells = row.find_elements(By.XPATH, ".//td | .//th")
-                if len(cells) >= 2:
-                    label = safe_get_text(cells[0]).lower().strip()
-                    value = safe_get_text(cells[1]).strip()
-                    
-                    field_name = self.map_field_name(label)
-                    if field_name and value and len(value) > 3:
-                        info[field_name] = value[:200]
-        except:
-            pass
-        
-        return info
-    
-    def extract_from_info_div(self, div_text):
-        """Extraer información de div de información"""
-        info = {}
-        try:
-            # Dividir por líneas y buscar patrones
-            lines = div_text.split('\n')
-            for line in lines:
-                line = line.strip()
-                if ':' in line and len(line) > 10:
-                    parts = line.split(':', 1)
-                    if len(parts) == 2:
-                        label = parts[0].strip().lower()
-                        value = parts[1].strip()
-                        
-                        field_name = self.map_field_name(label)
-                        if field_name and value and len(value) > 3:
-                            info[field_name] = value[:200]
-        except:
-            pass
-        
-        return info
-    
-    def get_sibling_text(self, element):
-        """Obtener texto de elemento hermano o siguiente"""
-        try:
-            # Buscar en siguiente elemento hermano
-            next_sibling = element.find_element(By.XPATH, "./following-sibling::*[1]")
-            text = safe_get_text(next_sibling)
-            if text and len(text) > 3:
-                return text
-            
-            # Buscar en padre siguiente
-            parent = element.find_element(By.XPATH, "./..")
-            parent_text = safe_get_text(parent)
-            element_text = safe_get_text(element)
-            if parent_text and element_text in parent_text:
-                remaining = parent_text.replace(element_text, '').strip()
-                if len(remaining) > 3:
-                    return remaining[:200]
-            
-            return ""
-        except:
-            return ""
-    
-    def map_field_name(self, label_text):
-        """Mapear texto de label a nombre de campo"""
-        mappings = {
-            'expediente': 'expediente',
-            'n° expediente': 'expediente', 
-            'numero expediente': 'expediente',
-            'distrito judicial': 'distrito_judicial',
-            'organo jurisdiccional': 'organo_jurisdiccional',
-            'órgano jurisdiccional': 'organo_jurisdiccional',
-            'juez': 'juez',
-            'magistrado': 'juez',
-            'precio base': 'precio_base',
-            'tasacion': 'tasacion',
-            'tasación': 'tasacion',
-            'convocatoria': 'convocatoria',
-            'descripcion': 'descripcion',
-            'descripción': 'descripcion'
-        }
-        
-        for key, field in mappings.items():
-            if key in label_text:
-                return field
-        
-        return None
-    
-    def extract_fields_text_enhanced(self, body_text):
-        """Extracción mejorada de campos desde texto"""
-        detail_info = {}
-        
-        # Limpiar y normalizar texto
-        clean_text = re.sub(r'\s+', ' ', body_text)
-        clean_text = re.sub(r'[^\w\s\-.:/()\u00C0-\u017F]', ' ', clean_text)
-        
-        field_patterns = {
-            'expediente': [
-                r'Expediente[:\s]*([A-Z0-9\-]+(?:\-\d+){3,})',
-                r'N°?\s*Expediente[:\s]*([A-Z0-9\-]+(?:\-\d+){3,})',
-                r'Exp[^a-z]*([A-Z0-9\-]+(?:\-\d+){3,})',
-                r'(\d{4,5}\-\d{4}\-\d\-\d{4}\-[A-Z]{2}\-[A-Z]{2}\-\d{2})'
-            ],
-            'distrito_judicial': [
-                r'Distrito\s+Judicial[:\s]*([A-ZÁÉÍÓÚÑ\s]+?)(?=\n|Órgano|Juez|$)',
-                r'Distrito[:\s]*([A-ZÁÉÍÓÚÑ\s]{3,30}?)(?=\n|[A-Z]{3,}|$)'
-            ],
-            'organo_jurisdiccional': [
-                r'Órgano\s+Jurisdiccional[:\s]*([^:\n]+?)(?=\n|Instancia|Juez|$)',
-                r'Órgano\s+Jurisdisccional[:\s]*([^:\n]+?)(?=\n|Instancia|Juez|$)',
-                r'Juzgado[:\s]*([^:\n]+?)(?=\n|Instancia|Juez|$)'
-            ],
-            'juez': [
-                r'Juez[:\s]*([A-ZÁÉÍÓÚÑ\s]+?)(?=\n|Especialista|Materia|$)',
-                r'Magistrado[:\s]*([A-ZÁÉÍÓÚÑ\s]+?)(?=\n|Especialista|$)'
-            ],
-            'precio_base': [
-                r'Precio\s+Base[:\s]*([USD\$S/\.\s\d,]+\.?\d*)',
-                r'Base[:\s]*([USD\$S/\.\s\d,]+\.?\d*)'
-            ],
-            'tasacion': [
-                r'Tasación[:\s]*([USD\$S/\.\s\d,]+\.?\d*)',
-                r'Tasacion[:\s]*([USD\$S/\.\s\d,]+\.?\d*)'
-            ],
-            'convocatoria': [
-                r'Convocatoria[:\s]*([A-Z\s]+?)(?=\n|Tasación|Precio|$)'
-            ]
-        }
-        
-        for field, patterns in field_patterns.items():
-            for pattern in patterns:
-                match = re.search(pattern, clean_text, re.IGNORECASE)
-                if match:
-                    value = match.group(1).strip()
-                    # Limpiar y validar valor
-                    value = re.sub(r'^[\s:]+', '', value)
-                    value = re.sub(r'\s+', ' ', value)
-                    
-                    if 3 < len(value) < 200 and value not in ['', 'N/A', '-']:
-                        detail_info[field] = value
-                        break
-        
-        return detail_info
-    
-    def assess_extraction_quality(self, detail_info):
-        """Evaluar calidad de extracción"""
-        important_fields = ['expediente', 'distrito_judicial', 'organo_jurisdiccional', 'juez']
-        filled_important = sum(1 for field in important_fields if detail_info.get(field))
-        
-        total_fields = len([v for v in detail_info.values() if v and v != ''])
-        
-        if filled_important >= 3:
-            return 'alta'
-        elif filled_important >= 2:
-            return 'media'
-        elif total_fields >= 3:
-            return 'baja'
-        else:
-            return 'muy_baja'
-    
-    def update_field_success_stats(self, detail_info):
-        """Actualizar estadísticas de éxito por campo"""
-        fields = ['expediente', 'distrito_judicial', 'organo_jurisdiccional', 'juez', 'precio_base', 'tasacion']
-        
-        for field in fields:
-            if field not in self.stats['field_extraction_success']:
-                self.stats['field_extraction_success'][field] = 0
-            
-            if detail_info.get(field):
-                self.stats['field_extraction_success'][field] += 1
-    
-    def save_result(self, result):
-        """Guardar resultado en remates_result.json"""
-        try:
-            with open(RESULT_FILE, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"💾 Resultado guardado en: {RESULT_FILE}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error guardando resultado: {e}")
-            return False
-    
-    def run(self):
-        """Ejecutar scraping con máxima precisión"""
-        try:
-            logger.info("🚀 Iniciando REMAJU Scraper de Alta Precisión")
-            
-            if not self.setup():
-                return self.create_error_result("Error en configuración")
-            
-            if not self.navigate_to_main_page():
-                return self.create_error_result("Error navegando a página principal")
-            
-            # Extraer remates con precisión
-            remates = self.extract_remates_precision()
-            
-            if not remates:
-                return self.create_error_result("No se encontraron remates")
-            
-            # Procesar detalles con precisión
             detailed_remates = []
-            max_details = min(MAX_DETAILS, len(remates))
+            max_details = min(MAX_DETAILS, len(remates_list))
             
-            logger.info(f"📊 Procesando detalles de alta precisión: {max_details}/{len(remates)}")
+            logger.info(f"📊 Procesando detalles para {max_details} remates...")
             
-            for i in range(max_details):
+            for i, remate in enumerate(remates_list[:max_details]):
                 try:
-                    remate = remates[i]
                     numero_remate = remate.get('numero_remate')
+                    logger.info(f"🎯 Detalle {i+1}/{max_details}: {numero_remate} (Página {remate.get('page_number', '?')})")
                     
-                    logger.info(f"🎯 Procesando precisión {i+1}/{max_details}: {numero_remate}")
-                    
-                    if self.navigate_to_detail_precision(remate):
-                        detail_info = self.extract_detail_precision()
+                    if self.navigate_to_detail_consistent(remate):
+                        detail_info = self.extract_detail_consistent()
                         
                         complete_remate = {
                             'numero_remate': numero_remate,
@@ -1025,104 +750,528 @@ class REMAJUScraperPrecision:
                         }
                         
                         detailed_remates.append(complete_remate)
-                        self.stats['remates_with_details'] += 1
+                        self.stats['total_remates_detailed'] += 1
                         
-                        logger.info(f"✅ Detalle precisión extraído: {numero_remate}")
+                        logger.info(f"✅ Detalle extraído: {numero_remate}")
                     else:
                         failed_remate = {
                             'numero_remate': numero_remate,
                             'basic_info': remate,
-                            'detalle': {'error': 'No se pudo acceder al detalle con precisión'},
+                            'detalle': apply_schema({}, DETALLE_SCHEMA),
                             'extraction_success': False
                         }
                         detailed_remates.append(failed_remate)
-                        logger.warning(f"⚠️ Sin detalle precisión: {numero_remate}")
+                        logger.warning(f"⚠️ Sin detalle: {numero_remate}")
                     
-                    # Regresar para siguiente con más tiempo
-                    if i < max_details - 1:
+                    # Regresar a página principal cada 5 remates para evitar timeout
+                    if (i + 1) % 5 == 0 or i == max_details - 1:
                         try:
+                            logger.info("🔙 Regresando a página principal...")
                             self.driver.get(self.main_page_url)
-                            wait_for_primefaces_ready(self.driver, timeout=30)
-                            time.sleep(3)
+                            wait_for_primefaces_ready(self.driver, timeout=20)
+                            time.sleep(2)
                         except:
                             pass
                     
                 except Exception as e:
-                    logger.error(f"❌ Error procesando precisión {i}: {e}")
-                    self.stats['errors'] += 1
+                    logger.error(f"❌ Error procesando detalle {i}: {e}")
                     continue
+            
+            return detailed_remates
+            
+        except Exception as e:
+            logger.error(f"❌ Error en extracción de detalles batch: {e}")
+            return []
+    
+    def navigate_to_detail_consistent(self, remate_data):
+        """Navegación consistente al detalle"""
+        try:
+            numero_remate = remate_data.get('numero_remate')
+            logger.debug(f"🔍 Navegando al detalle: {numero_remate}")
+            
+            initial_url = self.driver.current_url
+            
+            # Re-buscar botones
+            button_selectors = [
+                "//button[contains(@class, 'ui-button')]",
+                "//span[contains(@class, 'ui-button')]",
+                "//a[contains(@class, 'ui-button')]",
+                "//input[@type='submit']",
+                "//button[contains(text(), 'Detalle') or contains(text(), 'Ver')]"
+            ]
+            
+            for selector in button_selectors:
+                try:
+                    buttons = self.driver.find_elements(By.XPATH, selector)
+                    detail_buttons = []
+                    
+                    for button in buttons:
+                        try:
+                            if button.is_displayed() and button.is_enabled():
+                                btn_text = safe_get_text(button).lower()
+                                if any(keyword in btn_text for keyword in ['detalle', 'detail', 'ver', 'consultar', 'info']):
+                                    detail_buttons.append(button)
+                        except:
+                            continue
+                    
+                    if detail_buttons:
+                        logger.debug(f"🎯 Encontrados {len(detail_buttons)} botones de detalle")
+                        
+                        # Probar botones
+                        position = remate_data.get('position_in_page', 0)
+                        indices_to_try = [position, 0, 1, 2, 3]
+                        
+                        for idx in indices_to_try:
+                            if idx < len(detail_buttons):
+                                try:
+                                    button = detail_buttons[idx]
+                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                                    time.sleep(0.5)
+                                    self.driver.execute_script("arguments[0].click();", button)
+                                    
+                                    if self.wait_for_detail_load(initial_url):
+                                        return True
+                                    
+                                except:
+                                    continue
+                        
+                        break  # Si encontró botones pero ninguno funcionó
+                        
+                except:
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"❌ Error navegando al detalle: {e}")
+            return False
+    
+    def wait_for_detail_load(self, initial_url, timeout=10):
+        """Esperar carga de detalle"""
+        try:
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                current_url = self.driver.current_url
+                
+                if current_url != initial_url:
+                    time.sleep(1)
+                    wait_for_primefaces_ready(self.driver, timeout=8)
+                    return True
+                
+                # Verificar contenido de detalle
+                try:
+                    body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body")).lower()
+                    if any(indicator in body_text for indicator in ['expediente', 'tasación', 'distrito judicial']):
+                        return True
+                except:
+                    pass
+                
+                time.sleep(0.3)
+            
+            return False
+            
+        except:
+            return False
+    
+    def extract_detail_consistent(self):
+        """Extraer detalle con schema consistente"""
+        try:
+            logger.debug("📋 Extrayendo detalle consistente...")
+            
+            wait_for_primefaces_ready(self.driver, timeout=8)
+            
+            body_text = ""
+            try:
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                body_text = safe_get_text(body)
+            except:
+                return apply_schema({'error': 'No se pudo obtener texto'}, DETALLE_SCHEMA)
+            
+            # Extraer campos usando patrones mejorados
+            detail_data = self.extract_fields_comprehensive(body_text)
+            
+            # Agregar metadatos
+            detail_data.update({
+                'extraction_timestamp': datetime.now().isoformat(),
+                'source_url': self.driver.current_url,
+                'extraction_quality': self.assess_detail_quality(detail_data),
+                'quality_score': self.calculate_quality_score(detail_data)
+            })
+            
+            # Aplicar schema consistente
+            consistent_detail = apply_schema(detail_data, DETALLE_SCHEMA)
+            
+            return consistent_detail
+            
+        except Exception as e:
+            logger.debug(f"❌ Error extrayendo detalle consistente: {e}")
+            return apply_schema({'error': str(e)}, DETALLE_SCHEMA)
+    
+    def extract_fields_comprehensive(self, body_text):
+        """Extracción comprehensiva de campos"""
+        detail_data = {}
+        
+        # Limpiar texto
+        clean_text = re.sub(r'\s+', ' ', body_text)
+        clean_text = re.sub(r'[^\w\s\-.:/()\u00C0-\u017F]', ' ', clean_text)
+        
+        # Patrones mejorados para cada campo
+        field_patterns = {
+            'expediente': [
+                r'Expediente[:\s]*([A-Z0-9\-]{10,30})',
+                r'N°?\s*Expediente[:\s]*([A-Z0-9\-]{10,30})',
+                r'(\d{4,5}\-\d{4}\-\d\-\d{4}\-[A-Z]{2}\-[A-Z]{2}\-\d{2})'
+            ],
+            'numero_expediente_completo': [
+                r'(Exp\w*[:\s]*[A-Z0-9\-]{15,35})',
+                r'(Expediente[:\s]*[A-Z0-9\-]{15,35})'
+            ],
+            'distrito_judicial': [
+                r'Distrito\s+Judicial[:\s]*([A-ZÁÉÍÓÚÑ\s]{3,25})(?=\s*(?:Órgano|Instancia|Juez|\n|$))',
+            ],
+            'organo_jurisdiccional': [
+                r'Órgano\s+Jurisdiccional[:\s]*([^:\n]{5,80})(?=\s*(?:Instancia|Juez|\n|$))',
+                r'Órgano\s+Jurisdisccional[:\s]*([^:\n]{5,80})(?=\s*(?:Instancia|Juez|\n|$))',
+            ],
+            'instancia': [
+                r'Instancia[:\s]*([A-ZÁÉÍÓÚÑ\s]{5,40})(?=\s*(?:Juez|Especialista|\n|$))',
+            ],
+            'juez': [
+                r'Juez[:\s]*([A-ZÁÉÍÓÚÑ\s]{5,60})(?=\s*(?:Especialista|Materia|\n|$))',
+            ],
+            'especialista': [
+                r'Especialista[:\s]*([A-ZÁÉÍÓÚÑ\s]{5,60})(?=\s*(?:Materia|Resolución|\n|$))',
+            ],
+            'materia': [
+                r'Materia[:\s]*([A-ZÁÉÍÓÚÑ\s]{5,50})(?=\s*(?:Resolución|Fecha|\n|$))',
+            ],
+            'resolucion_numero': [
+                r'Resolución[:\s]*(\d+)',
+                r'Resolución\s+N°?\s*(\d+)',
+            ],
+            'fecha_resolucion': [
+                r'Fecha\s+Resolución[:\s]*(\d{1,2}/\d{1,2}/\d{4})',
+            ],
+            'convocatoria': [
+                r'Convocatoria[:\s]*([A-ZÁÉÍÓÚÑ\s]{5,30})(?=\s*(?:Tasación|Precio|\n|$))',
+            ],
+            'tasacion': [
+                r'Tasación[:\s]*([S/\.\$USD\d\s,]+\.?\d*)',
+            ],
+            'precio_base': [
+                r'Precio\s+Base[:\s]*([S/\.\$USD\d\s,]+\.?\d*)',
+            ],
+            'incremento_ofertas': [
+                r'Incremento\s+(?:entre\s+)?ofertas[:\s]*([S/\.\$USD\d\s,]+\.?\d*)',
+            ],
+            'arancel': [
+                r'Arancel[:\s]*([S/\.\$USD\d\s,]+\.?\d*)',
+            ],
+            'oblaje': [
+                r'Oblaje[:\s]*([S/\.\$USD\d\s,]+\.?\d*)',
+            ],
+            'area_m2': [
+                r'(?:AREA|Área)[^0-9]*(\d+\.?\d*)\s*M2',
+                r'(\d+\.?\d*)\s*M2',
+            ],
+            'partida_registral': [
+                r'Partida\s+Registral[:\s]*([A-Z0-9]+)',
+                r'P(\d{8,12})',
+            ],
+            'num_inscritos': [
+                r'N°?\s*inscritos[:\s]*(\d+)',
+                r'inscritos[:\s]*(\d+)',
+            ]
+        }
+        
+        # Extraer usando patrones
+        for field, patterns in field_patterns.items():
+            for pattern in patterns:
+                match = re.search(pattern, clean_text, re.IGNORECASE)
+                if match:
+                    value = match.group(1).strip()
+                    value = re.sub(r'^[\s:]+', '', value)
+                    value = re.sub(r'\s+', ' ', value)
+                    
+                    if 2 < len(value) < 200:
+                        detail_data[field] = value
+                        break
+        
+        # Descripción (campo más largo)
+        desc_patterns = [
+            r'Descripción[:\s]*([^:\n]{20,500}?)(?=\s*(?:N°\s*inscritos|Imágenes|\n\n|$))',
+            r'(?:DEPARTAMENTO|LOTE|INMUEBLE)[^:\n]*([^:\n]{20,300}?)(?=\s*(?:N°\s*inscritos|\n\n|$))',
+        ]
+        
+        for pattern in desc_patterns:
+            match = re.search(pattern, clean_text, re.IGNORECASE | re.DOTALL)
+            if match:
+                desc = match.group(1).strip()
+                desc = re.sub(r'\s+', ' ', desc)
+                if len(desc) > 20:
+                    detail_data['descripcion'] = desc[:400]  # Limitar longitud
+                    break
+        
+        return detail_data
+    
+    def assess_detail_quality(self, detail_data):
+        """Evaluar calidad de extracción de detalle"""
+        important_fields = [
+            'expediente', 'distrito_judicial', 'organo_jurisdiccional', 
+            'juez', 'precio_base', 'tasacion'
+        ]
+        
+        filled_important = sum(1 for field in important_fields if detail_data.get(field))
+        total_filled = sum(1 for v in detail_data.values() if v and str(v).strip())
+        
+        if filled_important >= 5:
+            return 'excelente'
+        elif filled_important >= 4:
+            return 'alta'
+        elif filled_important >= 2:
+            return 'media'
+        elif total_filled >= 3:
+            return 'baja'
+        else:
+            return 'muy_baja'
+    
+    def calculate_quality_score(self, detail_data):
+        """Calcular score numérico de calidad"""
+        field_weights = {
+            'expediente': 20,
+            'distrito_judicial': 15,
+            'organo_jurisdiccional': 15,
+            'juez': 15,
+            'precio_base': 10,
+            'tasacion': 10,
+            'convocatoria': 5,
+            'descripcion': 5,
+            'area_m2': 3,
+            'partida_registral': 2
+        }
+        
+        score = 0
+        max_score = sum(field_weights.values())
+        
+        for field, weight in field_weights.items():
+            if detail_data.get(field):
+                score += weight
+        
+        return round((score / max_score) * 100, 1)
+    
+    def update_field_completion_stats(self):
+        """Actualizar estadísticas de completitud de campos"""
+        if not hasattr(self, 'all_detailed_remates'):
+            return
+        
+        total_remates = len(self.all_detailed_remates)
+        if total_remates == 0:
+            return
+        
+        field_counts = {}
+        
+        # Contar campos completados
+        for remate in self.all_detailed_remates:
+            detalle = remate.get('detalle', {})
+            for field in DETALLE_SCHEMA.keys():
+                if field not in field_counts:
+                    field_counts[field] = 0
+                if detalle.get(field) and str(detalle[field]).strip():
+                    field_counts[field] += 1
+        
+        # Calcular porcentajes
+        for field, count in field_counts.items():
+            self.stats['field_completion_rates'][field] = round((count / total_remates) * 100, 2)
+    
+    def save_result(self, result):
+        """Guardar resultado en remates_result.json"""
+        try:
+            with open(RESULT_FILE, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"💾 Resultado escalable guardado en: {RESULT_FILE}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error guardando resultado: {e}")
+            return False
+    
+    def run_scalable_extraction(self):
+        """Ejecutar extracción escalable de múltiples páginas"""
+        try:
+            logger.info(f"🚀 Iniciando REMAJU Scraper Escalable - Target: {MAX_PAGES} páginas, {MAX_REMATES_TOTAL} remates")
+            
+            if not self.setup():
+                return self.create_error_result("Error en configuración escalable")
+            
+            if not self.navigate_to_main_page():
+                return self.create_error_result("Error navegando a página principal")
+            
+            # Detectar información de paginación
+            self.detect_pagination_info()
+            
+            # Procesar páginas
+            while (self.current_page <= MAX_PAGES and 
+                   self.total_remates_extracted < MAX_REMATES_TOTAL and
+                   self.pagination_info['has_next_page']):
+                
+                try:
+                    logger.info(f"📄 Procesando página {self.current_page}/{MAX_PAGES}")
+                    
+                    # Extraer remates de la página actual
+                    page_remates = self.extract_remates_from_current_page()
+                    
+                    if page_remates:
+                        self.all_remates.extend(page_remates)
+                        self.total_remates_extracted += len(page_remates)
+                        
+                        logger.info(f"✅ Página {self.current_page}: {len(page_remates)} remates "
+                                  f"(Total acumulado: {self.total_remates_extracted})")
+                    else:
+                        logger.warning(f"⚠️ Página {self.current_page}: 0 remates encontrados")
+                    
+                    # Verificar si alcanzó el límite
+                    if self.total_remates_extracted >= MAX_REMATES_TOTAL:
+                        logger.info(f"🎯 Límite de remates alcanzado: {self.total_remates_extracted}")
+                        break
+                    
+                    # Navegar a siguiente página
+                    if self.current_page < MAX_PAGES:
+                        if not self.navigate_to_next_page():
+                            logger.info("📄 No hay más páginas disponibles")
+                            break
+                    else:
+                        logger.info(f"📄 Límite de páginas alcanzado: {MAX_PAGES}")
+                        break
+                    
+                    # Pausa entre páginas para evitar sobrecarga
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error procesando página {self.current_page}: {e}")
+                    self.stats['extraction_errors'] += 1
+                    break
+            
+            logger.info(f"📊 Extracción de páginas completada: {self.total_remates_extracted} remates de {self.current_page} páginas")
+            
+            # Extraer detalles de remates seleccionados
+            if self.all_remates:
+                self.all_detailed_remates = self.extract_details_batch(self.all_remates)
+                self.update_field_completion_stats()
+            else:
+                return self.create_error_result("No se encontraron remates en ninguna página")
             
             # Crear resultado final
             result = {
                 'status': 'success',
                 'timestamp': datetime.now().isoformat(),
-                'sistema': 'REMAJU_PRECISION',
+                'sistema': 'REMAJU_ESCALABLE',
                 'fuente': MAIN_URL,
-                'estadisticas': self.generate_stats(),
-                'total_remates_encontrados': len(remates),
-                'remates_procesados': len(detailed_remates),
-                'technology_detected': 'JSF + PrimeFaces (Precisión)',
-                'precision_metrics': self.generate_precision_metrics(),
-                'remates': detailed_remates
+                'configuracion': {
+                    'max_pages_target': MAX_PAGES,
+                    'max_remates_target': MAX_REMATES_TOTAL,
+                    'max_details_target': MAX_DETAILS
+                },
+                'estadisticas': self.generate_scalable_stats(),
+                'pagination_info': self.pagination_info,
+                'consistency_metrics': self.generate_consistency_metrics(),
+                'total_remates_encontrados': self.total_remates_extracted,
+                'total_remates_detallados': len(self.all_detailed_remates),
+                'technology_detected': 'JSF + PrimeFaces (Escalable)',
+                'remates': self.all_detailed_remates
             }
             
             # Guardar resultado
             if self.save_result(result):
-                logger.info(f"🎉 Extracción de precisión completada: {len(detailed_remates)} procesados")
+                logger.info(f"🎉 Extracción escalable completada: {len(self.all_detailed_remates)} remates detallados")
                 return result
             else:
-                return self.create_error_result("Error guardando resultado")
+                return self.create_error_result("Error guardando resultado escalable")
             
         except Exception as e:
-            logger.error(f"❌ Error en ejecución de precisión: {e}")
+            logger.error(f"❌ Error en ejecución escalable: {e}")
             return self.create_error_result(str(e))
         
         finally:
             if self.driver:
                 self.driver.quit()
-                logger.info("🔒 Driver cerrado")
+                logger.info("🔒 Driver escalable cerrado")
     
-    def generate_precision_metrics(self):
-        """Generar métricas de precisión"""
-        total_attempts = self.stats['remates_with_details']
-        if total_attempts == 0:
-            return {}
-        
-        field_success_rates = {}
-        for field, successes in self.stats['field_extraction_success'].items():
-            field_success_rates[field] = round((successes / total_attempts) * 100, 2)
-        
-        return {
-            'extraction_precision_errors': self.stats['extraction_precision_errors'],
-            'field_success_rates': field_success_rates,
-            'overall_precision_score': round(sum(field_success_rates.values()) / len(field_success_rates), 2) if field_success_rates else 0
-        }
-    
-    def generate_stats(self):
-        """Generar estadísticas"""
+    def generate_scalable_stats(self):
+        """Generar estadísticas escalables"""
         duration = (datetime.now() - self.stats['start_time']).total_seconds()
         return {
             'duracion_segundos': round(duration, 2),
-            'total_remates_encontrados': self.stats['total_remates'],
-            'remates_con_detalle_exitoso': self.stats['remates_with_details'],
-            'errores': self.stats['errors'],
+            'paginas_procesadas': self.stats['pages_processed'],
+            'total_remates_encontrados': self.stats['total_remates_found'],
+            'total_remates_detallados': self.stats['total_remates_detailed'],
+            'errores_paginacion': self.stats['pagination_errors'],
+            'errores_extraccion': self.stats['extraction_errors'],
+            'errores_consistencia': self.stats['consistency_errors'],
+            'promedio_remates_por_pagina': round(
+                self.stats['total_remates_found'] / max(1, self.stats['pages_processed']), 2
+            ),
             'tasa_exito_detalle': round(
-                (self.stats['remates_with_details'] / max(1, self.stats['total_remates'])) * 100, 2
-            ) if self.stats['total_remates'] > 0 else 0,
+                (self.stats['total_remates_detailed'] / max(1, self.stats['total_remates_found'])) * 100, 2
+            ),
+            'field_completion_rates': self.stats['field_completion_rates'],
             'fecha_extraccion': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     
+    def generate_consistency_metrics(self):
+        """Generar métricas de consistencia"""
+        if not hasattr(self, 'all_detailed_remates'):
+            return {}
+        
+        total_remates = len(self.all_detailed_remates)
+        if total_remates == 0:
+            return {}
+        
+        # Verificar consistencia de campos básicos
+        basic_fields = ['numero_remate', 'titulo_card', 'ubicacion_corta', 'precio_base_texto']
+        basic_consistency = sum(
+            1 for remate in self.all_detailed_remates 
+            if all(remate.get('basic_info', {}).get(field) for field in basic_fields)
+        )
+        
+        # Verificar consistencia de campos de detalle
+        detail_fields = ['expediente', 'distrito_judicial', 'organo_jurisdiccional']
+        detail_consistency = sum(
+            1 for remate in self.all_detailed_remates 
+            if all(remate.get('detalle', {}).get(field) for field in detail_fields)
+        )
+        
+        # Calcular scores de calidad
+        quality_scores = [
+            remate.get('detalle', {}).get('quality_score', 0) 
+            for remate in self.all_detailed_remates
+        ]
+        avg_quality_score = round(sum(quality_scores) / len(quality_scores), 2) if quality_scores else 0
+        
+        return {
+            'basic_info_consistency': round((basic_consistency / total_remates) * 100, 2),
+            'detail_info_consistency': round((detail_consistency / total_remates) * 100, 2),
+            'average_quality_score': avg_quality_score,
+            'quality_distribution': {
+                'excelente': sum(1 for r in self.all_detailed_remates if r.get('detalle', {}).get('extraction_quality') == 'excelente'),
+                'alta': sum(1 for r in self.all_detailed_remates if r.get('detalle', {}).get('extraction_quality') == 'alta'),
+                'media': sum(1 for r in self.all_detailed_remates if r.get('detalle', {}).get('extraction_quality') == 'media'),
+                'baja': sum(1 for r in self.all_detailed_remates if r.get('detalle', {}).get('extraction_quality') == 'baja')
+            }
+        }
+    
     def create_error_result(self, error_message):
-        """Crear resultado de error"""
+        """Crear resultado de error escalable"""
         result = {
             'status': 'error',
             'timestamp': datetime.now().isoformat(),
             'error_message': error_message,
-            'estadisticas': self.generate_stats(),
+            'estadisticas': self.generate_scalable_stats(),
+            'pagination_info': self.pagination_info,
             'remates': []
         }
         
-        # Intentar guardar incluso si hay error
         try:
             self.save_result(result)
         except:
@@ -1131,34 +1280,37 @@ class REMAJUScraperPrecision:
         return result
 
 def main():
-    """Función principal de alta precisión"""
+    """Función principal escalable"""
     try:
-        logger.info("🚀 REMAJU Scraper de Alta Precisión")
+        logger.info(f"🚀 REMAJU Scraper Escalable - Target: {MAX_PAGES} páginas, {MAX_REMATES_TOTAL} remates")
         
-        scraper = REMAJUScraperPrecision()
-        resultado = scraper.run()
+        scraper = REMAJUScraperScalable()
+        resultado = scraper.run_scalable_extraction()
         
         if resultado['status'] == 'success':
             stats = resultado['estadisticas']
-            precision_metrics = resultado.get('precision_metrics', {})
+            consistency = resultado.get('consistency_metrics', {})
+            pagination = resultado.get('pagination_info', {})
             
-            logger.info(f"🎉 ÉXITO DE ALTA PRECISIÓN")
+            logger.info(f"🎉 ÉXITO ESCALABLE")
+            logger.info(f"📄 Páginas procesadas: {stats['paginas_procesadas']}")
             logger.info(f"📊 {stats['total_remates_encontrados']} remates encontrados")
-            logger.info(f"✅ {stats['remates_con_detalle_exitoso']} con detalle extraído")
-            logger.info(f"🎯 Score de precisión: {precision_metrics.get('overall_precision_score', 'N/A')}")
+            logger.info(f"✅ {stats['total_remates_detallados']} remates detallados")
+            logger.info(f"📈 Promedio por página: {stats['promedio_remates_por_pagina']}")
+            logger.info(f"🎯 Consistencia básica: {consistency.get('basic_info_consistency', 0)}%")
+            logger.info(f"🎯 Calidad promedio: {consistency.get('average_quality_score', 0)}")
             logger.info(f"⏱️ Duración: {stats['duracion_segundos']} segundos")
             
-            print(f"SUCCESS: {stats['total_remates_encontrados']} remates, {stats['remates_con_detalle_exitoso']} detalles de precisión")
+            print(f"SUCCESS: {stats['total_remates_encontrados']} remates de {stats['paginas_procesadas']} páginas")
             return 0
         else:
-            logger.error(f"❌ ERROR DE PRECISIÓN: {resultado['error_message']}")
+            logger.error(f"❌ ERROR ESCALABLE: {resultado['error_message']}")
             print(f"ERROR: {resultado['error_message']}")
             return 1
         
     except Exception as e:
-        logger.error(f"❌ Error crítico de precisión: {e}")
+        logger.error(f"❌ Error crítico escalable: {e}")
         
-        # Crear archivo de error mínimo
         try:
             error_result = {
                 'status': 'error',
