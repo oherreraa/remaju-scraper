@@ -14,7 +14,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
+from selenium.common.exceptions import TimeoutException, JavascriptException
 from selenium.webdriver.common.action_chains import ActionChains
 
 # Configuración global
@@ -26,36 +26,118 @@ MAIN_URL = f"{BASE_URL}/remaju/pages/publico/remateExterno.xhtml"
 MAX_DETAILS = int(os.environ.get('MAX_DETAILS', '3'))
 HEADLESS = os.environ.get('HEADLESS', 'false').lower() == 'true'
 
+class PrimeFacesWaitConditions:
+    """Condiciones de espera específicas para PrimeFaces"""
+    
+    @staticmethod
+    def primefaces_ajax_complete(driver):
+        """Verificar que PrimeFaces haya completado todas las requests AJAX"""
+        try:
+            return driver.execute_script("""
+                return (typeof window.PrimeFaces !== 'undefined') 
+                    ? window.PrimeFaces.ajax.Queue.isEmpty() 
+                    : true;
+            """)
+        except JavascriptException:
+            return True
+    
+    @staticmethod 
+    def jquery_ajax_complete(driver):
+        """Verificar que jQuery haya completado todas las requests AJAX"""
+        try:
+            return driver.execute_script("""
+                return (typeof window.jQuery !== 'undefined') 
+                    ? (jQuery.active === 0) 
+                    : true;
+            """)
+        except JavascriptException:
+            return True
+    
+    @staticmethod
+    def document_ready_complete(driver):
+        """Verificar que el document esté completamente cargado"""
+        try:
+            return driver.execute_script("return document.readyState") == "complete"
+        except JavascriptException:
+            return True
+    
+    @staticmethod
+    def all_ajax_complete(driver):
+        """Verificar que todo AJAX esté completo"""
+        return (PrimeFacesWaitConditions.primefaces_ajax_complete(driver) and 
+                PrimeFacesWaitConditions.jquery_ajax_complete(driver) and
+                PrimeFacesWaitConditions.document_ready_complete(driver))
+
 def create_chrome_driver():
-    """Configurar driver Chrome optimizado"""
+    """Configurar driver Chrome optimizado para JSF/PrimeFaces"""
     try:
         chrome_options = Options()
         if HEADLESS:
             chrome_options.add_argument("--headless=new")
         
-        # Opciones esenciales
+        # Configuración base
         chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-dev-shm-usage") 
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
-        # Opciones adicionales para estabilidad
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-plugins")
-        chrome_options.add_argument("--disable-images")  # Cargar más rápido
-        chrome_options.add_argument("--disable-javascript-harmony-shipping")
+        # User agent realista
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Optimizaciones para JavaScript
+        chrome_options.add_argument("--enable-javascript")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # Habilitar logging de performance para debug
+        caps = {
+            'goog:loggingPrefs': {'performance': 'ALL', 'browser': 'ALL'}
+        }
+        chrome_options.set_capability('goog:loggingPrefs', caps['goog:loggingPrefs'])
         
         driver = webdriver.Chrome(options=chrome_options)
-        driver.set_page_load_timeout(90)
-        driver.implicitly_wait(5)
+        driver.set_page_load_timeout(120)  # Timeout más largo
+        driver.implicitly_wait(15)  # Espera implícita para elementos
+        
+        # Ejecutar script anti-detección
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         return driver
     except Exception as e:
         logger.error(f"Error configurando driver: {e}")
         return None
 
-def safe_find_element(driver, by, value, timeout=10, optional=False):
-    """Buscar elemento de forma segura"""
+def wait_for_primefaces_ready(driver, timeout=30):
+    """Esperar que PrimeFaces esté completamente cargado y listo"""
+    try:
+        logger.info("⏳ Esperando que PrimeFaces esté listo...")
+        
+        # Esperar que PrimeFaces esté definido
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return typeof window.PrimeFaces !== 'undefined'")
+        )
+        
+        # Esperar que no haya AJAX activo
+        WebDriverWait(driver, timeout).until(
+            lambda d: PrimeFacesWaitConditions.all_ajax_complete(d)
+        )
+        
+        # Espera adicional para estabilización
+        time.sleep(3)
+        
+        logger.info("✅ PrimeFaces listo")
+        return True
+        
+    except TimeoutException:
+        logger.warning("⚠️ Timeout esperando PrimeFaces, continuando...")
+        return False
+    except Exception as e:
+        logger.warning(f"⚠️ Error esperando PrimeFaces: {e}")
+        return False
+
+def safe_find_element(driver, by, value, timeout=15, optional=False):
+    """Buscar elemento de forma segura con timeout extendido"""
     try:
         return WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
     except TimeoutException:
@@ -68,28 +150,19 @@ def safe_get_text(element, default=""):
     try:
         if element:
             text = element.get_attribute('textContent') or element.text or default
-            return ' '.join(text.strip().split())  # Limpiar espacios
+            return ' '.join(text.strip().split())
         return default
     except:
         return default
-
-def wait_for_page_change(driver, initial_url, timeout=15):
-    """Esperar que cambie la URL de la página"""
-    try:
-        WebDriverWait(driver, timeout).until(lambda d: d.current_url != initial_url)
-        return True
-    except TimeoutException:
-        return False
 
 def extract_price_info(text):
     """Extraer precio, monto y moneda de texto"""
     if not text:
         return "", 0.0, ""
     
-    # Patrones específicos para REMAJU
     patterns = [
         (r'Precio\s+Base\s+(S/\.|\$|USD)\s*([\d,]+\.?\d*)', 1, 2),
-        (r'(S/\.|\$|USD)\s*([\d,]+\.?\d*)', 1, 2),
+        (r'(S/\.|\$|USD)\s*([\d,]+\.?\d*)', 1, 2), 
         (r'([\d,]+\.?\d*)\s*(SOLES|DOLARES|USD)', 2, 1),
     ]
     
@@ -111,19 +184,19 @@ def extract_price_info(text):
     
     return text, 0.0, ""
 
-class REMAJUScraperImproved:
-    """Scraper mejorado para REMAJU"""
+class REMAJUPrimeFacesScraper:
+    """Scraper optimizado para REMAJU usando JSF/PrimeFaces"""
     
     def __init__(self):
         self.driver = None
-        self.current_url = ""
         self.main_page_url = ""
+        self.performance_logs = []
         self.stats = {
             'start_time': datetime.now(),
             'total_remates': 0,
             'remates_with_details': 0,
             'errors': 0,
-            'navigation_errors': 0
+            'ajax_calls_detected': 0
         }
     
     def setup(self):
@@ -132,666 +205,674 @@ class REMAJUScraperImproved:
             self.driver = create_chrome_driver()
             if not self.driver:
                 return False
-            logger.info("✅ Driver configurado correctamente")
+            logger.info("✅ Driver configurado para JSF/PrimeFaces")
             return True
         except Exception as e:
             logger.error(f"❌ Error en setup: {e}")
             return False
     
     def navigate_to_main_page(self):
-        """Navegar a página principal"""
+        """Navegar a página principal con manejo específico de PrimeFaces"""
         try:
-            logger.info("🌐 Navegando a REMAJU...")
+            logger.info("🌐 Navegando a REMAJU (JSF/PrimeFaces)...")
             self.driver.get(MAIN_URL)
             
-            # Esperar carga completa
-            WebDriverWait(self.driver, 20).until(
+            # Esperar carga inicial del DOM
+            WebDriverWait(self.driver, 30).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             
-            # Espera adicional para JavaScript
-            time.sleep(8)
+            # Esperar que PrimeFaces esté listo
+            wait_for_primefaces_ready(self.driver, timeout=40)
             
             self.main_page_url = self.driver.current_url
-            logger.info(f"✅ Página principal cargada: {self.main_page_url}")
+            logger.info(f"✅ Página JSF cargada: {self.main_page_url}")
+            
+            # Analizar logs de performance para debug
+            self.analyze_performance_logs()
+            
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error navegando a página principal: {e}")
+            logger.error(f"❌ Error navegando: {e}")
             return False
     
-    def extract_remates_from_page(self):
-        """Extraer remates de la página principal - MÉTODO MEJORADO"""
+    def analyze_performance_logs(self):
+        """Analizar logs de performance para detectar AJAX calls"""
+        try:
+            logs = self.driver.get_log('performance')
+            ajax_calls = 0
+            
+            for log in logs:
+                message = json.loads(log['message'])
+                if message['message']['method'] == 'Network.requestWillBeSent':
+                    url = message['message']['params'].get('request', {}).get('url', '')
+                    if any(keyword in url.lower() for keyword in ['ajax', 'jsf', 'primefaces', '.xhtml']):
+                        ajax_calls += 1
+            
+            self.stats['ajax_calls_detected'] = ajax_calls
+            logger.info(f"🔍 AJAX calls detectadas: {ajax_calls}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error analizando performance logs: {e}")
+    
+    def wait_for_element_with_content(self, timeout=20):
+        """Esperar elementos con contenido específico para PrimeFaces"""
+        try:
+            # Estrategias específicas para componentes PrimeFaces
+            primefaces_selectors = [
+                # DataTable components
+                "//table[contains(@class, 'ui-datatable')]",
+                "//div[contains(@class, 'ui-datatable')]",
+                # Panel components  
+                "//div[contains(@class, 'ui-panel')]",
+                "//div[contains(@class, 'ui-fieldset')]",
+                # Form components
+                "//form[contains(@class, 'ui-')]",
+                # Button components
+                "//button[contains(@class, 'ui-button')]",
+                "//span[contains(@class, 'ui-button')]"
+            ]
+            
+            logger.info("🔍 Buscando componentes PrimeFaces...")
+            
+            for selector in primefaces_selectors:
+                try:
+                    elements = WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_all_elements_located((By.XPATH, selector))
+                    )
+                    if elements:
+                        logger.info(f"✅ Encontrados {len(elements)} elementos: {selector}")
+                        return True
+                except TimeoutException:
+                    continue
+            
+            logger.warning("⚠️ No se encontraron componentes PrimeFaces estándar")
+            return False
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error esperando elementos PrimeFaces: {e}")
+            return False
+    
+    def extract_remates_primefaces(self):
+        """Extracción específica para componentes PrimeFaces"""
         remates = []
         try:
-            logger.info("📋 Extrayendo remates de la página...")
+            logger.info("📋 Extrayendo remates con método PrimeFaces...")
             
-            # Esperar carga completa
-            time.sleep(5)
+            # Esperar componentes PrimeFaces
+            self.wait_for_element_with_content()
             
-            # Estrategia 1: Buscar por patrones de texto "Remate N°"
-            body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
-            remate_numbers = re.findall(r'Remate\s+N°?\s*(\d+)', body_text, re.IGNORECASE)
+            # Estrategia 1: Buscar en DataTables de PrimeFaces
+            datatable_selectors = [
+                "//table[contains(@class, 'ui-datatable')]//tbody//tr",
+                "//div[contains(@class, 'ui-datatable')]//tbody//tr",
+                "//table//tbody//tr[td[contains(text(), 'Remate')]]"
+            ]
             
-            # Filtrar y obtener números únicos
-            unique_numbers = []
-            for num in remate_numbers:
-                if len(num) >= 4 and len(num) <= 6 and num not in unique_numbers:
-                    unique_numbers.append(num)
-            
-            logger.info(f"🔍 Encontrados {len(unique_numbers)} números de remate únicos")
-            
-            # Estrategia 2: Buscar elementos que contengan información de remates
-            remate_elements = []
-            
-            # Buscar divs o elementos que contengan números de remate
-            for numero in unique_numbers[:10]:  # Límite para pruebas
+            for selector in datatable_selectors:
                 try:
-                    # Buscar elementos que contengan este número específico
-                    elements = self.driver.find_elements(By.XPATH, f"//*[contains(text(), '{numero}')]")
-                    
-                    for element in elements:
-                        try:
-                            # Buscar el contenedor más grande que tenga información relevante
-                            parent = element
-                            for _ in range(5):  # Buscar hasta 5 niveles arriba
-                                try:
-                                    parent_candidate = parent.find_element(By.XPATH, "./..")
-                                    parent_text = safe_get_text(parent_candidate)
-                                    
-                                    # Si el padre tiene información de precio y es sustancial, usarlo
-                                    if (len(parent_text) > len(safe_get_text(parent)) and 
-                                        any(keyword in parent_text.lower() for keyword in ['precio', 'base', 'convocatoria', 'remate'])):
-                                        parent = parent_candidate
-                                    else:
-                                        break
-                                except:
-                                    break
-                            
-                            element_text = safe_get_text(parent)
-                            if len(element_text) > 100:  # Solo elementos con contenido sustancial
-                                remate_elements.append({
-                                    'numero': numero,
-                                    'element': parent,
-                                    'text': element_text
-                                })
-                                break  # Solo uno por número de remate
-                        except:
-                            continue
+                    rows = self.driver.find_elements(By.XPATH, selector)
+                    if rows:
+                        logger.info(f"🎯 Encontradas {len(rows)} filas en tabla: {selector}")
+                        remates.extend(self.extract_from_table_rows(rows))
+                        if remates:
+                            break
                 except:
                     continue
             
-            logger.info(f"🎯 Encontrados {len(remate_elements)} elementos de remate con contenido")
-            
-            # Procesar elementos encontrados
-            for i, remate_info in enumerate(remate_elements):
-                try:
-                    numero_remate = remate_info['numero']
-                    text = remate_info['text']
-                    element = remate_info['element']
-                    
-                    # Extraer información básica
-                    precio_texto, precio_numerico, moneda = extract_price_info(text)
-                    
-                    # Extraer convocatoria
-                    if "PRIMERA CONVOCATORIA" in text.upper():
-                        tipo_convocatoria = "PRIMERA"
-                        numero_convocatoria = "PRIMERA CONVOCATORIA"
-                    elif "SEGUNDA CONVOCATORIA" in text.upper():
-                        tipo_convocatoria = "SEGUNDA"
-                        numero_convocatoria = "SEGUNDA CONVOCATORIA"
-                    else:
-                        tipo_convocatoria = ""
-                        numero_convocatoria = ""
-                    
-                    # Extraer fecha
-                    fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', text)
-                    hora_match = re.search(r'(\d{1,2}:\d{2})', text)
-                    
-                    # Extraer ubicación/descripción
-                    ubicacion = ""
-                    descripcion = ""
-                    
-                    # Buscar palabras clave de ubicación
-                    ubicacion_patterns = [
-                        r'(?:LIMA|CALLAO|PIURA|TRUJILLO|AREQUIPA|CUSCO|HUANCAYO|CHICLAYO|TACNA|ICA)[^,\n]*',
-                        r'(?:DISTRITO|PROVINCIA|DEPARTAMENTO)\s+[A-ZÁÉÍÓÚÑ\s]+',
-                    ]
-                    
-                    for pattern in ubicacion_patterns:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match:
-                            ubicacion = match.group().strip()[:50]
-                            break
-                    
-                    # Buscar línea más descriptiva
-                    lines = [line.strip() for line in text.split('\n') if line.strip()]
-                    for line in lines:
-                        if (len(line) > 30 and len(line) < 200 and
-                            not re.search(r'Remate|Precio|Convocatoria|\d{2}/\d{4}', line)):
-                            descripcion = line
-                            break
-                    
-                    # Buscar botón de detalle asociado a este elemento
-                    detail_button = None
+            # Estrategia 2: Buscar en paneles/cards de PrimeFaces
+            if not remates:
+                panel_selectors = [
+                    "//div[contains(@class, 'ui-panel')]",
+                    "//div[contains(@class, 'ui-fieldset')]",
+                    "//div[contains(@class, 'ui-widget')]"
+                ]
+                
+                for selector in panel_selectors:
                     try:
-                        # Buscar dentro del elemento o sus hermanos
-                        detail_selectors = [
-                            ".//button[contains(text(), 'Detalle')]",
-                            ".//input[@value='Detalle']",
-                            ".//a[contains(text(), 'Detalle')]",
-                            ".//following-sibling::*//button[contains(text(), 'Detalle')]",
-                            ".//preceding-sibling::*//button[contains(text(), 'Detalle')]"
-                        ]
-                        
-                        for selector in detail_selectors:
-                            try:
-                                button = element.find_element(By.XPATH, selector)
-                                if button.is_displayed() and button.is_enabled():
-                                    detail_button = button
-                                    break
-                            except:
-                                continue
-                        
+                        panels = self.driver.find_elements(By.XPATH, selector)
+                        for panel in panels:
+                            panel_text = safe_get_text(panel)
+                            if 'remate' in panel_text.lower():
+                                remates.extend(self.extract_from_panel(panel))
                     except:
-                        pass
-                    
-                    remate_data = {
-                        'numero_remate': numero_remate,
-                        'tipo_convocatoria': tipo_convocatoria,
-                        'numero_convocatoria': numero_convocatoria,
-                        'titulo_card': f"Remate N° {numero_remate}" + (f" - {numero_convocatoria}" if numero_convocatoria else ""),
-                        'ubicacion_corta': ubicacion,
-                        'fecha_presentacion_oferta': fecha_match.group(1) if fecha_match else "",
-                        'hora_presentacion_oferta': hora_match.group(1) if hora_match else "",
-                        'descripcion_corta': descripcion,
-                        'precio_base_texto': precio_texto,
-                        'precio_base_numerico': precio_numerico,
-                        'moneda': moneda,
-                        'element_reference': element,  # Guardar referencia para navegación
-                        'detail_button': detail_button,  # Botón específico si se encontró
-                        'card_index': i,
-                        'posicion_en_pagina': i + 1
-                    }
-                    
-                    remates.append(remate_data)
-                    logger.info(f"✅ Remate {numero_remate} extraído: {ubicacion}")
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Error procesando remate {i}: {e}")
-                    continue
+                        continue
+            
+            # Estrategia 3: Buscar en toda la página después de AJAX completo
+            if not remates:
+                logger.info("🔄 Esperando AJAX adicional y extrayendo de página completa...")
+                time.sleep(5)  # Espera adicional
+                wait_for_primefaces_ready(self.driver, timeout=20)
+                remates = self.extract_from_full_page_primefaces()
             
             self.stats['total_remates'] = len(remates)
-            logger.info(f"📊 Total extraído: {len(remates)} remates")
+            logger.info(f"📊 Total extraído con PrimeFaces: {len(remates)} remates")
+            
+            # Guardar debug info
+            self.save_debug_info()
+            
             return remates
             
         except Exception as e:
-            logger.error(f"❌ Error extrayendo remates: {e}")
-            return []
+            logger.error(f"❌ Error extrayendo remates PrimeFaces: {e}")
+            return self.extract_from_full_page_primefaces()  # Fallback
     
-    def navigate_to_detail(self, remate_data):
-        """Navegar al detalle de un remate - VERSIÓN COMPLETAMENTE MEJORADA"""
+    def extract_from_table_rows(self, rows):
+        """Extraer remates desde filas de tabla PrimeFaces"""
+        remates = []
+        try:
+            for i, row in enumerate(rows[:20]):  # Máximo 20 filas
+                try:
+                    row_text = safe_get_text(row)
+                    
+                    # Buscar número de remate
+                    numero_match = re.search(r'Remate\s+N°?\s*(\d+)', row_text, re.IGNORECASE)
+                    if not numero_match:
+                        numero_match = re.search(r'(\d{4,6})', row_text)  # Números de 4-6 dígitos
+                    
+                    if numero_match:
+                        numero_remate = numero_match.group(1)
+                        
+                        # Extraer celdas de la fila
+                        cells = row.find_elements(By.TAG_NAME, "td")
+                        cell_texts = [safe_get_text(cell) for cell in cells]
+                        
+                        # Buscar botón de detalle en la fila
+                        detail_button = None
+                        button_selectors = [
+                            ".//button[contains(@class, 'ui-button')]",
+                            ".//span[contains(@class, 'ui-button')]",
+                            ".//a[contains(@class, 'ui-button')]",
+                            ".//button[contains(text(), 'Detalle')]",
+                            ".//a[contains(text(), 'Detalle')]"
+                        ]
+                        
+                        for btn_selector in button_selectors:
+                            try:
+                                detail_button = row.find_element(By.XPATH, btn_selector)
+                                if detail_button.is_displayed() and detail_button.is_enabled():
+                                    break
+                            except:
+                                detail_button = None
+                                continue
+                        
+                        # Extraer información de las celdas
+                        precio_texto, precio_numerico, moneda = "", 0.0, ""
+                        ubicacion = ""
+                        fecha = ""
+                        
+                        for cell_text in cell_texts:
+                            if not precio_texto:
+                                precio_texto, precio_numerico, moneda = extract_price_info(cell_text)
+                            
+                            if not fecha and re.search(r'\d{1,2}/\d{1,2}/\d{4}', cell_text):
+                                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
+                                fecha = fecha_match.group(1)
+                            
+                            if not ubicacion and any(ciudad in cell_text.upper() for ciudad in ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO']):
+                                for ciudad in ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO']:
+                                    if ciudad in cell_text.upper():
+                                        ubicacion = ciudad
+                                        break
+                        
+                        remate_data = {
+                            'numero_remate': numero_remate,
+                            'titulo_card': f"Remate N° {numero_remate}",
+                            'ubicacion_corta': ubicacion,
+                            'fecha_presentacion_oferta': fecha,
+                            'precio_base_texto': precio_texto,
+                            'precio_base_numerico': precio_numerico,
+                            'moneda': moneda,
+                            'cell_data': cell_texts,
+                            'detail_button': detail_button,
+                            'row_element': row,
+                            'card_index': i,
+                            'extraction_method': 'primefaces_table'
+                        }
+                        
+                        remates.append(remate_data)
+                        logger.info(f"✅ Remate tabla {numero_remate}: {ubicacion}")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Error procesando fila {i}: {e}")
+                    continue
+            
+        except Exception as e:
+            logger.error(f"❌ Error extrayendo de filas: {e}")
+        
+        return remates
+    
+    def extract_from_panel(self, panel):
+        """Extraer remate desde panel PrimeFaces"""
+        remates = []
+        try:
+            panel_text = safe_get_text(panel)
+            
+            # Buscar número de remate
+            numero_match = re.search(r'Remate\s+N°?\s*(\d+)', panel_text, re.IGNORECASE)
+            if numero_match:
+                numero_remate = numero_match.group(1)
+                
+                # Extraer información del panel
+                precio_texto, precio_numerico, moneda = extract_price_info(panel_text)
+                
+                fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', panel_text)
+                fecha = fecha_match.group(1) if fecha_match else ""
+                
+                # Buscar botón de detalle en el panel
+                detail_button = None
+                try:
+                    detail_button = panel.find_element(By.XPATH, ".//button[contains(@class, 'ui-button')] | .//a[contains(@class, 'ui-button')]")
+                except:
+                    pass
+                
+                remate_data = {
+                    'numero_remate': numero_remate,
+                    'titulo_card': f"Remate N° {numero_remate}",
+                    'fecha_presentacion_oferta': fecha,
+                    'precio_base_texto': precio_texto,
+                    'precio_base_numerico': precio_numerico,
+                    'moneda': moneda,
+                    'detail_button': detail_button,
+                    'panel_element': panel,
+                    'extraction_method': 'primefaces_panel'
+                }
+                
+                remates.append(remate_data)
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error extrayendo de panel: {e}")
+        
+        return remates
+    
+    def extract_from_full_page_primefaces(self):
+        """Fallback: extraer de página completa después de PrimeFaces"""
+        remates = []
+        try:
+            logger.info("🔄 Extracción fallback desde página completa...")
+            
+            body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
+            
+            # Buscar números de remate
+            remate_numbers = re.findall(r'Remate\s+N°?\s*(\d+)', body_text, re.IGNORECASE)
+            unique_numbers = list(set(remate_numbers))[:10]  # Máximo 10
+            
+            logger.info(f"🔍 Números únicos en página completa: {unique_numbers}")
+            
+            for i, numero in enumerate(unique_numbers):
+                try:
+                    # Buscar contexto del número
+                    pattern = rf'Remate\s+N°?\s*{numero}.*?(?=Remate\s+N°?|\Z)'
+                    context_match = re.search(pattern, body_text, re.IGNORECASE | re.DOTALL)
+                    context = context_match.group(0) if context_match else ""
+                    
+                    if len(context) < 50:  # Si el contexto es muy pequeño, buscar más
+                        # Buscar elementos que contengan el número
+                        number_elements = self.driver.find_elements(By.XPATH, f"//*[contains(text(), '{numero}')]")
+                        
+                        best_context = ""
+                        for element in number_elements[:3]:
+                            try:
+                                # Buscar contenedor padre con más información
+                                current = element
+                                for _ in range(4):
+                                    try:
+                                        parent = current.find_element(By.XPATH, "./..")
+                                        parent_text = safe_get_text(parent)
+                                        
+                                        if len(parent_text) > len(best_context) and numero in parent_text:
+                                            best_context = parent_text
+                                        current = parent
+                                    except:
+                                        break
+                            except:
+                                continue
+                        
+                        context = best_context or context
+                    
+                    # Extraer información del contexto
+                    precio_texto, precio_numerico, moneda = extract_price_info(context)
+                    
+                    fecha_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', context)
+                    fecha = fecha_match.group(1) if fecha_match else ""
+                    
+                    # Determinar ubicación
+                    ubicacion = ""
+                    for ciudad in ['LIMA', 'CALLAO', 'AREQUIPA', 'CUSCO', 'TRUJILLO']:
+                        if ciudad in context.upper():
+                            ubicacion = ciudad
+                            break
+                    
+                    remate_data = {
+                        'numero_remate': numero,
+                        'titulo_card': f"Remate N° {numero}",
+                        'ubicacion_corta': ubicacion,
+                        'fecha_presentacion_oferta': fecha,
+                        'precio_base_texto': precio_texto,
+                        'precio_base_numerico': precio_numerico,
+                        'moneda': moneda,
+                        'context_text': context[:500],
+                        'card_index': i,
+                        'extraction_method': 'fallback_fullpage'
+                    }
+                    
+                    remates.append(remate_data)
+                    logger.info(f"✅ Remate fallback {numero}: {ubicacion}")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error procesando remate {numero}: {e}")
+                    continue
+            
+        except Exception as e:
+            logger.error(f"❌ Error en extracción fallback: {e}")
+        
+        return remates
+    
+    def navigate_to_detail_primefaces(self, remate_data):
+        """Navegación específica para botones PrimeFaces"""
         try:
             numero_remate = remate_data.get('numero_remate')
-            logger.info(f"🔍 Navegando al detalle del remate {numero_remate}")
+            logger.info(f"🔍 Navegando al detalle PrimeFaces: {numero_remate}")
             
             initial_url = self.driver.current_url
             
-            # Estrategia 1: Usar botón específico si se encontró
+            # Estrategia 1: Botón específico PrimeFaces
             if remate_data.get('detail_button'):
                 try:
                     button = remate_data['detail_button']
-                    logger.info("🎯 Usando botón específico encontrado")
+                    logger.info("🎯 Usando botón PrimeFaces específico")
                     
-                    # Scroll al botón y hacer click
+                    # Scroll al botón
                     self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
                     time.sleep(1)
                     
-                    # Intentar click JavaScript primero
+                    # Click con manejo de PrimeFaces
                     self.driver.execute_script("arguments[0].click();", button)
                     
-                    if self.wait_for_navigation_or_modal():
-                        logger.info("✅ Navegación exitosa con botón específico")
+                    # Esperar respuesta AJAX de PrimeFaces
+                    if self.wait_for_primefaces_navigation():
+                        logger.info("✅ Navegación PrimeFaces exitosa")
                         return True
                         
                 except Exception as e:
-                    logger.warning(f"⚠️ Error con botón específico: {e}")
+                    logger.warning(f"⚠️ Error con botón PrimeFaces: {e}")
             
-            # Estrategia 2: Buscar botones cerca del elemento del remate
-            if remate_data.get('element_reference'):
-                try:
-                    element = remate_data['element_reference']
-                    logger.info("🔍 Buscando botones cerca del elemento del remate")
-                    
-                    # Buscar botones de detalle en contexto del elemento
-                    context_selectors = [
-                        ".//button[contains(translate(text(), 'DETALLE', 'detalle'), 'detalle')]",
-                        ".//input[contains(translate(@value, 'DETALLE', 'detalle'), 'detalle')]",
-                        ".//a[contains(translate(text(), 'DETALLE', 'detalle'), 'detalle')]",
-                        ".//*[contains(@onclick, 'detalle') or contains(@onclick, 'mostrar')]",
-                        ".//following::button[contains(text(), 'Detalle')][1]",
-                        ".//ancestor::*//button[contains(text(), 'Detalle')]"
-                    ]
-                    
-                    for selector in context_selectors:
-                        try:
-                            buttons = element.find_elements(By.XPATH, selector)
-                            for button in buttons:
-                                if button.is_displayed() and button.is_enabled():
-                                    logger.info(f"🎯 Intentando botón encontrado con: {selector}")
-                                    
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-                                    time.sleep(1)
-                                    self.driver.execute_script("arguments[0].click();", button)
-                                    
-                                    if self.wait_for_navigation_or_modal():
-                                        logger.info("✅ Navegación exitosa con botón contextual")
-                                        return True
-                                    
-                        except Exception as e:
-                            continue
-                            
-                except Exception as e:
-                    logger.warning(f"⚠️ Error buscando botones contextuales: {e}")
-            
-            # Estrategia 3: Buscar todos los botones de detalle en la página
+            # Estrategia 2: Buscar botones PrimeFaces globales
             try:
-                logger.info("🔍 Buscando todos los botones de detalle en la página")
+                logger.info("🎯 Buscando botones PrimeFaces globales")
                 
-                global_selectors = [
-                    "//button[contains(translate(text(), 'DETALLE', 'detalle'), 'detalle')]",
-                    "//input[contains(translate(@value, 'DETALLE', 'detalle'), 'detalle')]",
-                    "//a[contains(translate(text(), 'DETALLE', 'detalle'), 'detalle')]",
-                    "//*[contains(@onclick, 'detalle') or contains(@onclick, 'mostrar')]"
+                pf_button_selectors = [
+                    "//button[contains(@class, 'ui-button')]",
+                    "//span[contains(@class, 'ui-button')]",
+                    "//a[contains(@class, 'ui-button')]",
+                    "//input[contains(@class, 'ui-button')]"
                 ]
                 
-                all_detail_buttons = []
-                for selector in global_selectors:
+                all_buttons = []
+                for selector in pf_button_selectors:
                     try:
                         buttons = self.driver.find_elements(By.XPATH, selector)
                         for button in buttons:
                             if button.is_displayed() and button.is_enabled():
-                                all_detail_buttons.append(button)
+                                btn_text = safe_get_text(button).lower()
+                                if any(keyword in btn_text for keyword in ['detalle', 'detail', 'ver', 'consultar']):
+                                    all_buttons.append(button)
                     except:
                         continue
                 
-                logger.info(f"🔍 Encontrados {len(all_detail_buttons)} botones de detalle")
+                logger.info(f"📊 Botones PrimeFaces relevantes: {len(all_buttons)}")
                 
-                # Intentar con el botón correspondiente al índice
+                # Probar botones por orden
                 card_index = remate_data.get('card_index', 0)
-                if card_index < len(all_detail_buttons):
-                    try:
-                        button = all_detail_buttons[card_index]
-                        logger.info(f"🎯 Intentando botón índice {card_index}")
-                        
-                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-                        time.sleep(1)
-                        self.driver.execute_script("arguments[0].click();", button)
-                        
-                        if self.wait_for_navigation_or_modal():
-                            logger.info("✅ Navegación exitosa con botón por índice")
-                            return True
-                            
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error con botón por índice: {e}")
+                indices_to_try = [card_index] + list(range(len(all_buttons)))
                 
-                # Intentar con todos los botones si el índice no funcionó
-                for i, button in enumerate(all_detail_buttons[:5]):  # Máximo 5 intentos
+                for idx in indices_to_try[:5]:
+                    if idx >= len(all_buttons):
+                        continue
+                        
                     try:
-                        logger.info(f"🎯 Intentando botón global {i}")
+                        button = all_buttons[idx]
+                        logger.info(f"🎯 Probando botón PrimeFaces {idx}")
                         
                         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
                         time.sleep(1)
                         self.driver.execute_script("arguments[0].click();", button)
                         
-                        if self.wait_for_navigation_or_modal():
-                            logger.info(f"✅ Navegación exitosa con botón global {i}")
+                        if self.wait_for_primefaces_navigation():
+                            logger.info(f"✅ Éxito con botón PrimeFaces {idx}")
                             return True
                         else:
-                            # Si no navegó, volver a la página principal para el siguiente intento
-                            if self.driver.current_url != initial_url:
-                                self.return_to_main_page()
+                            self.return_to_main_if_needed(initial_url)
                             
                     except Exception as e:
-                        logger.warning(f"⚠️ Error con botón global {i}: {e}")
+                        logger.warning(f"⚠️ Error con botón {idx}: {e}")
                         continue
                         
             except Exception as e:
-                logger.warning(f"⚠️ Error en búsqueda global de botones: {e}")
+                logger.warning(f"⚠️ Error buscando botones PrimeFaces: {e}")
             
-            # Estrategia 4: Buscar por texto del remate en links
-            try:
-                logger.info("🔍 Buscando links que contengan el número de remate")
-                
-                remate_links = self.driver.find_elements(By.XPATH, f"//a[contains(text(), '{numero_remate}')]")
-                
-                for link in remate_links:
-                    try:
-                        if link.is_displayed() and link.is_enabled():
-                            logger.info(f"🎯 Intentando link con número de remate")
-                            
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link)
-                            time.sleep(1)
-                            self.driver.execute_script("arguments[0].click();", link)
-                            
-                            if self.wait_for_navigation_or_modal():
-                                logger.info("✅ Navegación exitosa con link del remate")
-                                return True
-                                
-                    except Exception as e:
-                        continue
-                        
-            except Exception as e:
-                logger.warning(f"⚠️ Error buscando links del remate: {e}")
-            
-            logger.error(f"❌ No se pudo navegar al detalle del remate {numero_remate}")
-            self.stats['navigation_errors'] += 1
+            logger.error(f"❌ No se pudo navegar al detalle PrimeFaces: {numero_remate}")
             return False
             
         except Exception as e:
             logger.error(f"❌ Error navegando al detalle: {e}")
-            self.stats['navigation_errors'] += 1
             return False
     
-    def wait_for_navigation_or_modal(self, timeout=15):
-        """Esperar navegación o modal de detalle"""
+    def wait_for_primefaces_navigation(self, timeout=20):
+        """Esperar navegación o respuesta AJAX de PrimeFaces"""
         try:
             initial_url = self.driver.current_url
             
-            # Esperar hasta que ocurra uno de estos cambios
-            def check_navigation():
-                current_url = self.driver.current_url
-                body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body")).lower()
-                
-                # Verificar cambio de URL
-                if current_url != initial_url:
-                    return True
-                
-                # Verificar contenido de detalle en la misma página (modal o actualización AJAX)
-                detail_indicators = [
-                    'expediente', 'tasación', 'partida registral', 
-                    'órgano jurisdiccional', 'cronograma', 
-                    'inmuebles', 'resolución', 'distrito judicial'
-                ]
-                
-                return any(indicator in body_text for indicator in detail_indicators)
+            def check_primefaces_response():
+                try:
+                    # Verificar cambio de URL
+                    current_url = self.driver.current_url  
+                    if current_url != initial_url:
+                        return True
+                    
+                    # Verificar contenido de detalle cargado via AJAX
+                    body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body")).lower()
+                    detail_indicators = [
+                        'expediente', 'tasación', 'partida', 'distrito judicial',
+                        'órgano jurisdiccional', 'cronograma', 'inmuebles',
+                        'resolución', 'juez', 'materia', 'convocatoria'
+                    ]
+                    
+                    has_detail_content = any(indicator in body_text for indicator in detail_indicators)
+                    
+                    # Verificar que PrimeFaces haya completado AJAX
+                    ajax_complete = PrimeFacesWaitConditions.all_ajax_complete(self.driver)
+                    
+                    return has_detail_content and ajax_complete
+                    
+                except:
+                    return False
             
-            # Esperar con timeout
+            # Esperar respuesta
             start_time = time.time()
             while time.time() - start_time < timeout:
-                if check_navigation():
-                    time.sleep(2)  # Esperar estabilización
+                if check_primefaces_response():
+                    # Espera adicional para estabilización
+                    time.sleep(2)
+                    wait_for_primefaces_ready(self.driver, timeout=10)
                     return True
                 time.sleep(0.5)
             
             return False
             
         except Exception as e:
-            logger.warning(f"⚠️ Error esperando navegación: {e}")
+            logger.warning(f"⚠️ Error esperando navegación PrimeFaces: {e}")
             return False
     
-    def return_to_main_page(self):
-        """Volver a la página principal"""
+    def return_to_main_if_needed(self, expected_url):
+        """Regresar a página principal con manejo PrimeFaces"""
         try:
-            logger.info("🔙 Regresando a página principal...")
-            
-            # Intentar botón regresar primero
-            back_selectors = [
-                "//button[contains(translate(text(), 'REGRESAR', 'regresar'), 'regresar')]",
-                "//a[contains(translate(text(), 'REGRESAR', 'regresar'), 'regresar')]",
-                "//input[contains(translate(@value, 'REGRESAR', 'regresar'), 'regresar')]",
-                "//button[contains(text(), 'Volver')]",
-                "//a[contains(text(), 'Volver')]"
-            ]
-            
-            for selector in back_selectors:
-                try:
-                    back_button = safe_find_element(self.driver, By.XPATH, selector, timeout=5, optional=True)
-                    if back_button and back_button.is_displayed() and back_button.is_enabled():
-                        logger.info("🎯 Usando botón regresar")
-                        self.driver.execute_script("arguments[0].click();", back_button)
-                        time.sleep(3)
-                        return True
-                except:
-                    continue
-            
-            # Si no hay botón, navegar directamente
-            if self.main_page_url and self.driver.current_url != self.main_page_url:
-                logger.info("🌐 Navegando directamente a página principal")
+            current_url = self.driver.current_url
+            if current_url != expected_url:
+                logger.info("🔙 Regresando con manejo PrimeFaces...")
+                
+                # Buscar botón regresar PrimeFaces
+                back_selectors = [
+                    "//button[contains(@class, 'ui-button') and contains(translate(text(), 'REGRESAR', 'regresar'), 'regresar')]",
+                    "//a[contains(@class, 'ui-button') and contains(translate(text(), 'REGRESAR', 'regresar'), 'regresar')]",
+                    "//span[contains(@class, 'ui-button') and contains(translate(text(), 'VOLVER', 'volver'), 'volver')]"
+                ]
+                
+                for selector in back_selectors:
+                    try:
+                        back_btn = safe_find_element(self.driver, By.XPATH, selector, timeout=5, optional=True)
+                        if back_btn and back_btn.is_displayed():
+                            self.driver.execute_script("arguments[0].click();", back_btn)
+                            wait_for_primefaces_ready(self.driver, timeout=15)
+                            return
+                    except:
+                        continue
+                
+                # Si no hay botón, navegar directamente
                 self.driver.get(self.main_page_url)
-                time.sleep(5)
-                return True
-            
-            # Último recurso: usar browser back
-            logger.info("⬅️ Usando navegación hacia atrás")
-            self.driver.back()
-            time.sleep(3)
-            return True
-            
+                wait_for_primefaces_ready(self.driver, timeout=20)
+                
         except Exception as e:
             logger.warning(f"⚠️ Error regresando: {e}")
-            return False
     
-    def extract_detail_info(self):
-        """Extraer información detallada de la página actual"""
+    def extract_detail_primefaces(self):
+        """Extraer detalle con manejo específico de PrimeFaces"""
         try:
-            logger.info("📋 Extrayendo información detallada...")
+            logger.info("📋 Extrayendo detalle PrimeFaces...")
             
-            # Esperar carga completa
-            time.sleep(3)
+            # Esperar que PrimeFaces complete la carga
+            wait_for_primefaces_ready(self.driver, timeout=15)
             
             body_text = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
             
-            # Extraer información básica del detalle
+            # Extracción básica de campos
             detail_info = {
-                'expediente': self.extract_field_from_text(body_text, ['Expediente', 'N° Expediente']),
-                'distrito_judicial': self.extract_field_from_text(body_text, ['Distrito Judicial']),
-                'organo_jurisdiccional': self.extract_field_from_text(body_text, ['Órgano Jurisdiccional']),
-                'precio_base': self.extract_field_from_text(body_text, ['Precio Base']),
-                'tasacion': self.extract_field_from_text(body_text, ['Tasación']),
-                'convocatoria': self.extract_field_from_text(body_text, ['Convocatoria']),
-                'juez': self.extract_field_from_text(body_text, ['Juez']),
-                'materia': self.extract_field_from_text(body_text, ['Materia']),
-                'full_text_length': len(body_text),
+                'expediente': self.extract_field_value_primefaces(body_text, ['Expediente', 'N° Expediente']),
+                'distrito_judicial': self.extract_field_value_primefaces(body_text, ['Distrito Judicial']),
+                'organo_jurisdiccional': self.extract_field_value_primefaces(body_text, ['Órgano Jurisdiccional']),
+                'juez': self.extract_field_value_primefaces(body_text, ['Juez']),
+                'precio_base': self.extract_field_value_primefaces(body_text, ['Precio Base']),
+                'tasacion': self.extract_field_value_primefaces(body_text, ['Tasación']),
+                'convocatoria': self.extract_field_value_primefaces(body_text, ['Convocatoria']),
                 'extraction_timestamp': datetime.now().isoformat(),
-                'source_url': self.driver.current_url
+                'source_url': self.driver.current_url,
+                'primefaces_components': self.detect_primefaces_components()
             }
             
-            # Intentar extraer tabs si existen
-            detail_info['tabs'] = self.extract_tabs_info()
-            
-            logger.info(f"✅ Detalle extraído: {detail_info.get('expediente', 'N/A')}")
+            logger.info(f"✅ Detalle PrimeFaces extraído - Expediente: {detail_info.get('expediente') or 'N/A'}")
             return detail_info
             
         except Exception as e:
-            logger.error(f"❌ Error extrayendo detalle: {e}")
+            logger.error(f"❌ Error extrayendo detalle PrimeFaces: {e}")
             return {
                 'error': str(e),
                 'extraction_timestamp': datetime.now().isoformat(),
                 'source_url': self.driver.current_url if self.driver else 'unknown'
             }
     
-    def extract_field_from_text(self, text, field_labels):
-        """Extraer valor de campo del texto usando múltiples labels"""
+    def extract_field_value_primefaces(self, text, field_labels):
+        """Extraer valor de campo con manejo específico de PrimeFaces"""
         for label in field_labels:
-            # Patrón: label seguido de : y valor
-            pattern = rf'{re.escape(label)}\s*:?\s*([^\n\r]+)'
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                value = match.group(1).strip()
-                # Limpiar valor común
-                value = re.sub(r'^[\s:]+', '', value)
-                if len(value) > 3:  # Solo valores sustanciales
-                    return value
-        return ""
-    
-    def extract_tabs_info(self):
-        """Extraer información de tabs si están disponibles"""
-        tabs_info = {}
-        
-        try:
-            # Buscar tabs visibles
-            tab_selectors = [
-                "//a[contains(@class, 'tab') or contains(@role, 'tab')]",
-                "//button[contains(@class, 'tab') or contains(@role, 'tab')]",
-                "//li[contains(@class, 'tab')]//a",
-                "//*[contains(text(), 'Remate') or contains(text(), 'Inmuebles') or contains(text(), 'Cronograma')]"
+            patterns = [
+                rf'{re.escape(label)}\s*:?\s*([^\n\r]+)',
+                rf'{re.escape(label)}\s*[:\-]\s*([^\n\r]+)',
+                rf'<.*?>\s*{re.escape(label)}\s*<.*?>\s*([^<\n\r]+)'  # Dentro de tags HTML
             ]
             
-            tabs_found = []
-            for selector in tab_selectors:
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    value = match.group(1).strip()
+                    value = re.sub(r'^[\s:]+', '', value)
+                    if len(value) > 3:
+                        return value
+        return ""
+    
+    def detect_primefaces_components(self):
+        """Detectar componentes PrimeFaces presentes"""
+        try:
+            components = []
+            component_selectors = {
+                'datatable': "//table[contains(@class, 'ui-datatable')]",
+                'panel': "//div[contains(@class, 'ui-panel')]", 
+                'fieldset': "//div[contains(@class, 'ui-fieldset')]",
+                'button': "//button[contains(@class, 'ui-button')]",
+                'tabs': "//div[contains(@class, 'ui-tabs')]",
+                'dialog': "//div[contains(@class, 'ui-dialog')]"
+            }
+            
+            for name, selector in component_selectors.items():
                 try:
                     elements = self.driver.find_elements(By.XPATH, selector)
-                    for element in elements:
-                        text = safe_get_text(element).strip()
-                        if (text and len(text) < 50 and 
-                            any(keyword in text.lower() for keyword in ['remate', 'inmuebles', 'cronograma', 'detalles'])):
-                            tabs_found.append({
-                                'text': text,
-                                'element': element
-                            })
+                    if elements:
+                        components.append({'component': name, 'count': len(elements)})
                 except:
                     continue
             
-            logger.info(f"🔍 Encontrados {len(tabs_found)} tabs potenciales")
-            
-            # Intentar hacer click en cada tab y extraer contenido
-            for tab in tabs_found[:3]:  # Máximo 3 tabs
-                try:
-                    tab_name = tab['text'].lower()
-                    element = tab['element']
-                    
-                    if element.is_displayed() and element.is_enabled():
-                        logger.info(f"🎯 Explorando tab: {tab['text']}")
-                        
-                        # Click en el tab
-                        self.driver.execute_script("arguments[0].click();", element)
-                        time.sleep(2)
-                        
-                        # Extraer contenido del tab
-                        tab_content = safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))
-                        
-                        # Procesar según el tipo de tab
-                        if 'inmuebles' in tab_name:
-                            tabs_info['inmuebles'] = self.extract_inmuebles_from_content(tab_content)
-                        elif 'cronograma' in tab_name:
-                            tabs_info['cronograma'] = self.extract_cronograma_from_content(tab_content)
-                        else:
-                            tabs_info[tab_name] = {
-                                'content_length': len(tab_content),
-                                'extracted_at': datetime.now().isoformat()
-                            }
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Error explorando tab {tab.get('text', 'unknown')}: {e}")
-                    continue
+            return components
             
         except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo tabs: {e}")
-        
-        return tabs_info
+            logger.warning(f"⚠️ Error detectando componentes PrimeFaces: {e}")
+            return []
     
-    def extract_inmuebles_from_content(self, content):
-        """Extraer información de inmuebles del contenido"""
-        inmuebles = []
-        
+    def save_debug_info(self):
+        """Guardar información de debug"""
         try:
-            # Buscar partidas registrales
-            partidas = re.findall(r'(\d{11,})', content)  # Partidas suelen ser números largos
+            debug_info = {
+                'timestamp': datetime.now().isoformat(),
+                'url': self.driver.current_url,
+                'performance_stats': {
+                    'ajax_calls_detected': self.stats['ajax_calls_detected'],
+                    'page_load_time': (datetime.now() - self.stats['start_time']).total_seconds()
+                },
+                'primefaces_components': self.detect_primefaces_components(),
+                'page_sample': safe_get_text(self.driver.find_element(By.TAG_NAME, "body"))[:2000]
+            }
             
-            # Buscar direcciones
-            direcciones = re.findall(r'(?:Ubicado|Dirección|Sito)[^.]*\.', content, re.IGNORECASE)
-            
-            # Buscar tipos de inmueble
-            tipos = re.findall(r'(Casa|Departamento|Terreno|Local|Oficina|Lote)[^.]*', content, re.IGNORECASE)
-            
-            # Combinar información encontrada
-            max_items = max(len(partidas), len(direcciones), len(tipos))
-            
-            for i in range(min(max_items, 5)):  # Máximo 5 inmuebles
-                inmueble = {
-                    'partida_registral': partidas[i] if i < len(partidas) else "",
-                    'direccion': direcciones[i] if i < len(direcciones) else "",
-                    'tipo': tipos[i] if i < len(tipos) else "",
-                    'orden': i + 1
-                }
-                inmuebles.append(inmueble)
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo inmuebles: {e}")
-        
-        return inmuebles
-    
-    def extract_cronograma_from_content(self, content):
-        """Extraer cronograma del contenido"""
-        eventos = []
-        
-        try:
-            # Buscar fechas en el contenido
-            fechas = re.findall(r'(\d{1,2}/\d{1,2}/\d{4})', content)
-            
-            # Buscar eventos asociados a fechas
-            fases = [
-                'Publicación e Inscripción',
-                'Validación de Inscripción',
-                'Presentación de Ofertas',
-                'Pago del Saldo'
-            ]
-            
-            for i, fase in enumerate(fases):
-                fecha_asociada = fechas[i] if i < len(fechas) else ""
+            with open('/home/claude/remaju_primefaces_debug.json', 'w', encoding='utf-8') as f:
+                json.dump(debug_info, f, ensure_ascii=False, indent=2)
                 
-                if fecha_asociada or fase.lower() in content.lower():
-                    evento = {
-                        'evento': fase,
-                        'fecha': fecha_asociada,
-                        'orden': i + 1
-                    }
-                    eventos.append(evento)
-            
         except Exception as e:
-            logger.warning(f"⚠️ Error extrayendo cronograma: {e}")
-        
-        return eventos
+            logger.warning(f"⚠️ Error guardando debug: {e}")
     
     def run_extraction(self):
-        """Ejecutar extracción completa - FLUJO MEJORADO"""
+        """Ejecutar extracción completa optimizada para PrimeFaces"""
         try:
-            logger.info("🚀 Iniciando extracción mejorada de REMAJU")
+            logger.info("🚀 Iniciando extracción REMAJU PrimeFaces")
             
-            # Setup inicial
             if not self.setup():
-                return self.create_error_result("Error en configuración inicial")
+                return self.create_error_result("Error en configuración PrimeFaces")
             
             if not self.navigate_to_main_page():
-                return self.create_error_result("Error navegando a página principal")
+                return self.create_error_result("Error navegando a página PrimeFaces")
             
-            # Extraer listado principal
-            remates = self.extract_remates_from_page()
+            # Extraer remates con método PrimeFaces
+            remates = self.extract_remates_primefaces()
             
             if not remates:
-                return self.create_error_result("No se encontraron remates en la página")
+                return self.create_error_result("No se encontraron remates con método PrimeFaces")
             
             # Extraer detalles
             detailed_remates = []
             max_details = min(MAX_DETAILS, len(remates))
             
-            logger.info(f"📊 Procesando detalles para {max_details} remates de {len(remates)} encontrados")
+            logger.info(f"📊 Procesando detalles PrimeFaces: {max_details}/{len(remates)}")
             
             for i in range(max_details):
                 try:
                     remate = remates[i]
                     numero_remate = remate.get('numero_remate')
                     
-                    logger.info(f"🎯 Procesando {i+1}/{max_details}: Remate {numero_remate}")
+                    logger.info(f"🎯 Procesando PrimeFaces {i+1}/{max_details}: {numero_remate}")
                     
-                    if self.navigate_to_detail(remate):
-                        detail_info = self.extract_detail_info()
+                    if self.navigate_to_detail_primefaces(remate):
+                        detail_info = self.extract_detail_primefaces()
                         
                         complete_remate = {
                             'numero_remate': numero_remate,
                             'basic_info': {k: v for k, v in remate.items() 
-                                         if k not in ['element_reference', 'detail_button']},
+                                         if k not in ['detail_button', 'row_element', 'panel_element']},
                             'detalle': detail_info,
                             'extraction_success': True
                         }
@@ -799,115 +880,115 @@ class REMAJUScraperImproved:
                         detailed_remates.append(complete_remate)
                         self.stats['remates_with_details'] += 1
                         
-                        logger.info(f"✅ Detalle extraído para remate {numero_remate}")
+                        logger.info(f"✅ Detalle PrimeFaces extraído: {numero_remate}")
                     else:
-                        # Agregar información básica aunque no se pueda acceder al detalle
                         failed_remate = {
                             'numero_remate': numero_remate,
                             'basic_info': {k: v for k, v in remate.items() 
-                                         if k not in ['element_reference', 'detail_button']},
-                            'detalle': {'error': 'No se pudo acceder al detalle'},
+                                         if k not in ['detail_button', 'row_element', 'panel_element']},
+                            'detalle': {'error': 'No se pudo acceder al detalle PrimeFaces'},
                             'extraction_success': False
                         }
                         detailed_remates.append(failed_remate)
-                        logger.warning(f"⚠️ No se pudo extraer detalle para remate {numero_remate}")
+                        logger.warning(f"⚠️ No se pudo extraer detalle PrimeFaces: {numero_remate}")
                     
-                    # Regresar a página principal para el siguiente remate
-                    if i < max_details - 1:  # No regresar en el último
-                        self.return_to_main_page()
-                        time.sleep(3)
+                    # Regresar para el siguiente
+                    if i < max_details - 1:
+                        self.return_to_main_if_needed(self.main_page_url)
+                        time.sleep(2)
                     
                 except Exception as e:
-                    logger.error(f"❌ Error procesando remate {i}: {e}")
+                    logger.error(f"❌ Error procesando remate PrimeFaces {i}: {e}")
                     self.stats['errors'] += 1
                     continue
             
-            # Resultado final
             result = {
                 'status': 'success',
                 'timestamp': datetime.now().isoformat(),
-                'sistema': 'REMAJU',
+                'sistema': 'REMAJU_PRIMEFACES',
                 'fuente': MAIN_URL,
                 'estadisticas': self.generate_stats(),
                 'total_remates_encontrados': len(remates),
                 'remates_procesados': len(detailed_remates),
-                'remates': detailed_remates,
-                'listado_basico': [
-                    {k: v for k, v in remate.items() 
-                     if k not in ['element_reference', 'detail_button']}
-                    for remate in remates
-                ]
+                'technology_detected': 'JSF + PrimeFaces',
+                'remates': detailed_remates
             }
             
-            logger.info(f"🎉 Extracción completada: {len(detailed_remates)} remates procesados")
+            logger.info(f"🎉 Extracción PrimeFaces completada: {len(detailed_remates)} procesados")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Error en extracción principal: {e}")
+            logger.error(f"❌ Error en extracción PrimeFaces: {e}")
             return self.create_error_result(str(e))
         
         finally:
             if self.driver:
                 self.driver.quit()
-                logger.info("🔒 Driver cerrado")
+                logger.info("🔒 Driver PrimeFaces cerrado")
     
     def generate_stats(self):
-        """Generar estadísticas de la extracción"""
+        """Generar estadísticas de extracción PrimeFaces"""
         duration = (datetime.now() - self.stats['start_time']).total_seconds()
         return {
             'duracion_segundos': round(duration, 2),
             'total_remates_encontrados': self.stats['total_remates'],
             'remates_con_detalle_exitoso': self.stats['remates_with_details'],
-            'errores_navegacion': self.stats['navigation_errors'],
-            'errores_procesamiento': self.stats['errors'],
+            'errores': self.stats['errors'],
+            'ajax_calls_detectadas': self.stats['ajax_calls_detected'],
             'tasa_exito_detalle': round(
                 (self.stats['remates_with_details'] / max(1, self.stats['total_remates'])) * 100, 2
             ),
+            'technology': 'JSF + PrimeFaces',
             'fecha_extraccion': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     
     def create_error_result(self, error_message):
-        """Crear resultado de error"""
+        """Crear resultado de error PrimeFaces"""
         return {
             'status': 'error',
             'timestamp': datetime.now().isoformat(),
             'error_message': error_message,
+            'technology_detected': 'JSF + PrimeFaces',
             'estadisticas': self.generate_stats(),
             'remates': []
         }
 
 def main():
-    """Función principal"""
+    """Función principal optimizada para PrimeFaces"""
     try:
-        logger.info("🚀 Iniciando REMAJU Scraper Mejorado")
+        logger.info("🚀 Iniciando REMAJU Scraper PrimeFaces")
         
-        scraper = REMAJUScraperImproved()
+        scraper = REMAJUPrimeFacesScraper()
         resultado = scraper.run_extraction()
         
         # Guardar resultado
-        output_file = '/home/claude/remates_result_improved.json'
+        output_file = '/home/claude/remates_primefaces_result.json'
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(resultado, f, ensure_ascii=False, indent=2)
         
         # Log resultado
         if resultado['status'] == 'success':
             stats = resultado['estadisticas']
-            logger.info(f"🎉 ÉXITO - {stats['total_remates_encontrados']} remates encontrados, "
-                       f"{stats['remates_con_detalle_exitoso']} con detalle extraído")
-            logger.info(f"📁 Resultado guardado en: {output_file}")
+            logger.info(f"🎉 ÉXITO PRIMEFACES")
+            logger.info(f"📊 {stats['total_remates_encontrados']} remates encontrados")
+            logger.info(f"✅ {stats['remates_con_detalle_exitoso']} con detalle extraído")
+            logger.info(f"🔄 {stats['ajax_calls_detectadas']} AJAX calls detectadas")
+            logger.info(f"⏱️ Duración: {stats['duracion_segundos']} segundos")
+            logger.info(f"📁 Resultado: {output_file}")
             
             print(f"status=success")
             print(f"total_remates={stats['total_remates_encontrados']}")
             print(f"remates_con_detalle={stats['remates_con_detalle_exitoso']}")
-            print(f"duracion={stats['duracion_segundos']}")
+            print(f"ajax_calls={stats['ajax_calls_detectadas']}")
+            print(f"technology=JSF+PrimeFaces")
         else:
-            logger.error(f"❌ ERROR: {resultado['error_message']}")
+            logger.error(f"❌ ERROR PRIMEFACES: {resultado['error_message']}")
             print(f"status=error")
         
         return resultado
         
     except Exception as e:
-        logger.error(f"❌ Error principal: {e}")
+        logger.error(f"❌ Error principal PrimeFaces: {e}")
         print(f"status=error")
         return {'status': 'error', 'error_message': str(e)}
 
